@@ -4,6 +4,9 @@ exec(open('e2e/play.py').read().split('url=')[0])  # rpc(), miner thread, SHIM
 url=f"file://{__import__('os').path.abspath(__import__('os').environ.get('SITE', '../swarm-derby-site/index.html'))}?network=local&rpc={RPC}&derby={A['derby']}&imd={A['imd']}"
 def cast_call(sig, *args):
     return subprocess.check_output(['cast','call',A['derby'],sig,*args,'--rpc-url',RPC]).decode().strip()
+# a fresh UTC day on the devnet: the board starts empty and today's 20 arcade swings are free
+day=int(rpc('eth_getBlockByNumber',['latest',False])['timestamp'],16)//86400
+rpc('evm_setNextBlockTimestamp',[(day+1)*86400+5]); rpc('evm_mine')
 with sync_playwright() as p:
     b=p.chromium.launch()
     # ── a visitor with no wallet sees the (empty) live board

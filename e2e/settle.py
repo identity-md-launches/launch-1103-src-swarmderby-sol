@@ -42,10 +42,14 @@ with sync_playwright() as p:
     sp.click('#lbToggle'); sp.wait_for_function("settle[0].state === 'ready' && settle[1].state === 'ready'", timeout=20000)
     print('arcade tab:', sp.evaluate("document.getElementById('lbSettleNote').textContent"), '|', sp.evaluate("document.getElementById('lbSettleBtn').textContent"))
     bal0=[imd_bal(player), imd_bal(agent), imd_bal(settler)]
-    sp.click('#lbSettleBtn'); sp.wait_for_function("settle[0].state === 'none'", timeout=30000)
+    def pay_all(league):   # one payout per finished day, oldest first
+        while sp.evaluate(f"settle[{league}].state") == 'ready':
+            d=sp.evaluate(f"String(settle[{league}].day)")
+            sp.click('#lbSettleBtn'); sp.wait_for_function(f"settle[{league}].state === 'none' || (settle[{league}].state === 'ready' && String(settle[{league}].day) !== '{d}')", timeout=30000)
+    pay_all(0)
     sp.click('#lbTabAgent'); sp.wait_for_timeout(100)
     print('agent tab:', sp.evaluate("document.getElementById('lbSettleNote').textContent"), '|', sp.evaluate("document.getElementById('lbSettleBtn').textContent"))
-    sp.click('#lbSettleBtn'); sp.wait_for_function("settle[1].state === 'none'", timeout=30000)
+    pay_all(1)
     bal1=[imd_bal(player), imd_bal(agent), imd_bal(settler)]
     print('paid: arcade player +%.6f, agent +%.6f, settler tip +%.6f IMD' % tuple((x-y)/1e18 for x,y in zip(bal1,bal0)))
     print('pots after:', [int(call('pot(uint256)(uint256)',str(l)).split()[0]) for l in (0,1)], 'rollover', [int(call('rollover(uint256)(uint256)',str(l)).split()[0]) for l in (0,1)])

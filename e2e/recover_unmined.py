@@ -22,7 +22,7 @@ with sync_playwright() as p:
     errs=[]; pg.on('pageerror', lambda e: errs.append(str(e)))
     pg.add_init_script(SHIM); pg.goto(url); pg.wait_for_timeout(300)
     pg.click('#walletBtn'); pg.wait_for_function("live.on && !live.busy", timeout=15000)
-    pg.evaluate("buyLive('pack')"); pg.wait_for_function("!live.busy && turnsLeft === 5", timeout=20000)
+    t=pg.evaluate("turnsLeft"); pg.evaluate("buyLive('pack')"); pg.wait_for_function(f"!live.busy && turnsLeft === {t + 5}", timeout=20000)
     print('== with the tx hash'); reload_before_receipt(pg, True)
     print('== without the tx hash'); reload_before_receipt(pg, False)
     print('errors', errs); globals()['stop']=True; b.close()

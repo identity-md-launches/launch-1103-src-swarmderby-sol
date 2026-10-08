@@ -1,0 +1,9 @@
+{
+  "name": "swarm-derby-house",
+  "private": true,
+  "type": "module",
+  "description": "SwarmDerby v2 house service: signs and sends the draw for every committed swing.",
+  "scripts": { "start": "node house.mjs" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "ethers": "6.15.0" }
+}

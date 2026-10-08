@@ -2,15 +2,11 @@
 pragma solidity 0.8.26;
 
 import {DerbyOdds} from "./DerbyOdds.sol";
+import {HouseDraw} from "./HouseDraw.sol";
 
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
-}
-
-interface IArbSys {
-    function arbBlockNumber() external view returns (uint256);
-    function arbBlockHash(uint256 arbBlockNum) external view returns (bytes32);
 }
 
 /// @title SwarmDerby
@@ -29,20 +25,21 @@ interface IArbSys {
 ///           MIN_TURN_PRICE a turn). Every purchase is split 40% burned, 45% to that league's
 ///           pot for the UTC day of the purchase, 10% to its slam vault, 5% ops.
 ///  Swings:  swing(league, quality, velo, commit), commit = keccak256(abi.encode(salt, player)).
-///           The roll uses the hash of a block REVEAL_DELAY blocks later; the player then calls
-///           finalize(swingId, salt). The player can't know the future hash when committing,
-///           the sequencer builds that block without knowing the salt, and an unrevealed swing
-///           counts as a foul, so nobody can steer a roll and hiding a bad one never pays.
+///           The house then signs the swing with its RSA key and calls draw(swingId, sig); the
+///           contract checks the signature (HouseDraw), and the player calls finalize(swingId,
+///           salt). The roll uses keccak256(salt, keccak256(sig)). The player can't make the
+///           signature, the house can't choose it (one valid signature per swing) and doesn't
+///           know the salt, and an unrevealed draw counts as a foul, so nobody can steer a roll
+///           and hiding a bad one never pays. No draw within DRAW_WINDOW gives the turn back.
 ///           A swing scores on the UTC day it was committed.
 ///  Slams:   a 550+ ft swing pays 10% of its league's vault instantly.
 ///  Daily:   the contract's own board ranks each day. Once a day is over and its last swing
-///           can no longer be revealed, anyone calls settleNextDay(league): that day's top 3
+///           can no longer be drawn or revealed, anyone calls settleNextDay(league): that day's top 3
 ///           are paid 60 / 25 / 15 from 90% of the day's pot (plus anything rolled over), the
 ///           caller earns 0.5% of that payout, and the rest rolls over to the next day.
 ///           Days settle in order, each exactly once.
 contract SwarmDerby {
     // ───────── constants ─────────
-    IArbSys internal constant ARB_SYS = IArbSys(address(100));
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
     uint8 public constant ARCADE = 0;
@@ -58,11 +55,14 @@ contract SwarmDerby {
     uint256 public constant PAYOUT_BPS = 9000; // share of a day's pot paid out; 10% rolls over
     uint256 public constant SETTLE_TIP_BPS = 50;
 
-    /// @notice L2 blocks between a swing and the block whose hash decides it (~0.5s at 100ms).
-    uint256 public constant REVEAL_DELAY = 5;
-    /// @notice After this many blocks past target (~25s at 100ms), an unrevealed swing counts
-    ///         as a foul. ArbSys serves the hashes of the last 256 blocks.
-    uint256 public constant FINALIZE_WINDOW = 255;
+    /// @notice The house must draw a swing within this time of its commit, or the turn comes back.
+    uint256 public constant DRAW_WINDOW = 5 minutes;
+    /// @notice After DRAW_WINDOW + REVEAL_WINDOW from the commit, an unrevealed draw counts as a foul.
+    uint256 public constant REVEAL_WINDOW = 5 minutes;
+    bytes32 public constant DRAW_TAG = keccak256("SwarmDerby.draw.v1");
+    /// @notice A new house key takes effect only this long after the owner proposes it, so
+    ///         players can see a key change coming and stop playing.
+    uint256 public constant KEY_DELAY = 2 days;
     uint256 public constant BOARD_SIZE = 10;
 
     bytes32 internal constant DOMAIN_TYPEHASH =
@@ -70,7 +70,7 @@ contract SwarmDerby {
     bytes32 internal constant SESSION_TYPEHASH = keccak256("Session(address player,address session,uint256 nonce)");
 
     // ───────── types ─────────
-    enum Status { None, Committed, Final }
+    enum Status { None, Committed, Drawn, Final, Refunded }
 
     struct Swing {
         address player;
@@ -78,9 +78,10 @@ contract SwarmDerby {
         uint8 quality;
         uint8 velo;
         Status status;
-        uint64 targetBlock;
+        uint64 committedAt; // block.timestamp of the commit
         bytes32 commit;
         uint32 day; // UTC day of the commit: the day the swing counts for
+        bytes32 drawHash; // keccak256 of the house signature, set by draw
     }
 
     // ───────── state ─────────
@@ -94,6 +95,13 @@ contract SwarmDerby {
     uint256[2] public pot;
     uint256[2] public vault;
     uint256 public opsBalance;
+    /// @notice The house RSA public key: a 2048-bit modulus (e = 65537). See HouseDraw.
+    ///         Empty after revokeHouseKey: then no swing can be drawn and every swing is refunded.
+    bytes public houseKey;
+    bytes public pendingHouseKey;    // proposed by the owner
+    uint256 public pendingHouseKeyAt; // when pendingHouseKey can be activated; 0 if none
+    /// @notice Commits already used. A reused salt would show the house a pending result.
+    mapping(bytes32 => bool) public commitUsed;
     mapping(uint8 => mapping(address => uint256)) public turns; // league => player => turns
     mapping(uint256 => mapping(address => uint256)) public arcadeSwings; // day => player => swings
 
@@ -117,7 +125,7 @@ contract SwarmDerby {
     /// @notice Daily settlement. Each UTC day with a purchase or a swing joins its league's
     ///         queue of days; settleNextDay pays them in order.
     mapping(uint8 => mapping(uint256 => uint256)) public dayPot;     // league => day => pot share of that day's purchases
-    mapping(uint8 => mapping(uint256 => uint64)) public dayLastTarget; // league => day => last target block of its swings
+    mapping(uint8 => mapping(uint256 => uint64)) public dayLastCommit; // league => day => timestamp of its last swing
     mapping(uint8 => uint256[]) internal _days;                      // league => days with activity, oldest first
     uint256[2] public settledDays;                                   // league => days settled from the front of _days
     uint256[2] public rollover;                                      // league => carried into the next settled day
@@ -125,7 +133,11 @@ contract SwarmDerby {
     // ───────── events ─────────
     event TurnsBought(address indexed player, uint8 indexed league, uint256 count, uint256 cost, uint256 burned);
     event SessionSet(address indexed player, address indexed session);
-    event SwingCommitted(uint256 indexed swingId, address indexed player, uint8 league, uint8 quality, uint8 velo, uint64 targetBlock);
+    event SwingCommitted(uint256 indexed swingId, address indexed player, uint8 league, uint8 quality, uint8 velo, uint64 committedAt);
+    event SwingDrawn(uint256 indexed swingId, bytes32 drawHash);
+    event SwingRefunded(uint256 indexed swingId, address indexed player, uint8 league);
+    event HouseKeySet(bytes32 keyHash); // bytes32(0) when revoked
+    event HouseKeyProposed(bytes32 keyHash, uint256 activeAt);
     event SwingResolved(uint256 indexed swingId, address indexed player, uint8 tier, uint16 feet);
     /// @notice Every homer, either league, credited to the UTC day of its commit.
     event Dinger(address indexed player, uint8 indexed league, uint256 indexed day, uint256 feet);
@@ -146,8 +158,12 @@ contract SwarmDerby {
     error BadCommit();
     error BadSalt();
     error WrongStatus();
-    error TooEarly();
     error NotExpired();
+    error BadDraw();
+    error DrawClosed();
+    error BadKey();
+    error CommitUsed();
+    error KeyNotReady();
     error BadSession();
     error TransferFailed();
     error NothingToSettle();
@@ -168,9 +184,13 @@ contract SwarmDerby {
 
     /// @param owner_ admin address. Pass it explicitly: when IMD's launch factory deploys
     ///               this, msg.sender is the factory (use `$owner` in the launch request).
-    constructor(address owner_, IERC20 imd_, uint256 singlePrice_, uint256 packPrice_) {
+    /// @param houseKey_ the house RSA modulus, 256 bytes big-endian (e = 65537)
+    constructor(address owner_, IERC20 imd_, uint256 singlePrice_, uint256 packPrice_, bytes memory houseKey_) {
         if (owner_ == address(0) || address(imd_) == address(0)) revert ZeroAddress();
         _checkPrices(singlePrice_, packPrice_);
+        _checkKey(houseKey_);
+        houseKey = houseKey_;
+        emit HouseKeySet(keccak256(houseKey_));
         imd = imd_;
         owner = owner_;
         emit OwnershipTransferred(address(0), owner_);
@@ -293,37 +313,56 @@ contract SwarmDerby {
 
         swingId = nextSwingId++;
         if (quality == 0) {
-            swings[swingId] = Swing(player, league, 0, velo, Status.Final, 0, bytes32(0), uint32(day));
+            swings[swingId] = Swing(player, league, 0, velo, Status.Final, 0, bytes32(0), uint32(day), bytes32(0));
             emit SwingResolved(swingId, player, DerbyOdds.WHIFF, 0);
             return swingId;
         }
         if (commit == bytes32(0)) revert BadCommit();
+        if (commitUsed[commit]) revert CommitUsed();
+        commitUsed[commit] = true;
 
-        uint64 target = uint64(ARB_SYS.arbBlockNumber() + REVEAL_DELAY);
+        uint64 nowTs = uint64(block.timestamp);
         _markDay(league, day);
-        if (target > dayLastTarget[league][day]) dayLastTarget[league][day] = target;
-        swings[swingId] = Swing(player, league, quality, velo, Status.Committed, target, commit, uint32(day));
-        emit SwingCommitted(swingId, player, league, quality, velo, target);
+        dayLastCommit[league][day] = nowTs;
+        swings[swingId] = Swing(player, league, quality, velo, Status.Committed, nowTs, commit, uint32(day), bytes32(0));
+        emit SwingCommitted(swingId, player, league, quality, velo, nowTs);
     }
 
-    /// @notice Reveal the salt once the target block exists. Anyone holding the salt may call
+    /// @notice What the house signs for a swing (RSASSA-PKCS1-v1_5, SHA-256).
+    function drawMessage(uint256 swingId) public view returns (bytes memory) {
+        Swing storage s = swings[swingId];
+        return abi.encode(DRAW_TAG, block.chainid, address(this), swingId, s.player, s.commit);
+    }
+
+    /// @notice Store the house draw for a committed swing. Anyone may send it, but only the
+    ///         house key can sign it, and each swing has exactly one valid signature.
+    function draw(uint256 swingId, bytes calldata sig) external {
+        Swing storage s = swings[swingId];
+        if (s.status != Status.Committed) revert WrongStatus();
+        if (block.timestamp > uint256(s.committedAt) + DRAW_WINDOW) revert DrawClosed();
+        if (!_drawValid(drawMessage(swingId), sig)) revert BadDraw();
+        bytes32 h = keccak256(sig);
+        s.status = Status.Drawn;
+        s.drawHash = h;
+        emit SwingDrawn(swingId, h);
+    }
+
+    function _drawValid(bytes memory message, bytes calldata sig) internal view virtual returns (bool) {
+        return HouseDraw.verify(houseKey, message, sig);
+    }
+
+    /// @notice Reveal the salt once the house has drawn. Anyone holding the salt may call
     ///         it, but only the player has it. Too late and the swing counts as a foul.
     function finalize(uint256 swingId, bytes32 salt) external returns (uint8 tier, uint16 feet) {
         Swing storage s = swings[swingId];
-        if (s.status != Status.Committed) revert WrongStatus();
+        if (s.status != Status.Drawn) revert WrongStatus();
         if (commitFor(salt, s.player) != s.commit) revert BadSalt();
-        uint256 current = ARB_SYS.arbBlockNumber();
-        if (current <= s.targetBlock) revert TooEarly();
 
         s.status = Status.Final;
-        bytes32 bh;
-        if (current - s.targetBlock <= FINALIZE_WINDOW) {
-            try ARB_SYS.arbBlockHash(s.targetBlock) returns (bytes32 h) { bh = h; } catch {}
-        }
-        if (bh == bytes32(0)) {
+        if (block.timestamp > uint256(s.committedAt) + DRAW_WINDOW + REVEAL_WINDOW) {
             tier = DerbyOdds.FOUL;
         } else {
-            (tier, feet) = DerbyOdds.roll(swingSeed(salt, bh), swingId, s.quality, s.velo);
+            (tier, feet) = DerbyOdds.roll(swingSeed(salt, s.drawHash), swingId, s.quality, s.velo);
         }
 
         if (tier >= DerbyOdds.HOMER) _recordDinger(s.league, s.day, s.player, feet);
@@ -341,17 +380,28 @@ contract SwarmDerby {
         emit SwingResolved(swingId, s.player, tier, feet);
     }
 
-    /// @notice Close out a swing nobody revealed in time. Counts as a foul.
+    /// @notice Close out a swing. Never drawn within DRAW_WINDOW: the turn (and the arcade
+    ///         cap slot) comes back. Drawn but not revealed in time: a foul.
     function expire(uint256 swingId) external {
         Swing storage s = swings[swingId];
-        if (s.status != Status.Committed) revert WrongStatus();
-        if (ARB_SYS.arbBlockNumber() <= uint256(s.targetBlock) + FINALIZE_WINDOW) revert NotExpired();
-        s.status = Status.Final;
-        emit SwingResolved(swingId, s.player, DerbyOdds.FOUL, 0);
+        uint256 committedAt = s.committedAt;
+        if (s.status == Status.Committed) {
+            if (block.timestamp <= committedAt + DRAW_WINDOW) revert NotExpired();
+            s.status = Status.Refunded;
+            turns[s.league][s.player] += 1;
+            if (s.league == ARCADE) arcadeSwings[s.day][s.player] -= 1;
+            emit SwingRefunded(swingId, s.player, s.league);
+        } else if (s.status == Status.Drawn) {
+            if (block.timestamp <= committedAt + DRAW_WINDOW + REVEAL_WINDOW) revert NotExpired();
+            s.status = Status.Final;
+            emit SwingResolved(swingId, s.player, DerbyOdds.FOUL, 0);
+        } else {
+            revert WrongStatus();
+        }
     }
 
-    function swingSeed(bytes32 salt, bytes32 targetHash) public pure returns (bytes32) {
-        return keccak256(abi.encode(salt, targetHash));
+    function swingSeed(bytes32 salt, bytes32 drawHash) public pure returns (bytes32) {
+        return keccak256(abi.encode(salt, drawHash));
     }
 
     /// @notice Preview the odds table for a quality (cumulative bps).
@@ -414,10 +464,11 @@ contract SwarmDerby {
 
     // ───────── daily settlement ─────────
 
-    /// @notice True once `day` is over and none of its swings can still be revealed, so its
-    ///         board is final.
+    /// @notice True once `day` is over and none of its swings can still be drawn or revealed,
+    ///         so its board is final.
     function dayClosed(uint8 league, uint256 day) public view returns (bool) {
-        return day < currentDay() && ARB_SYS.arbBlockNumber() > uint256(dayLastTarget[league][day]) + FINALIZE_WINDOW;
+        return day < currentDay()
+            && block.timestamp > uint256(dayLastCommit[league][day]) + DRAW_WINDOW + REVEAL_WINDOW;
     }
 
     /// @notice The league's oldest unsettled day and what settling it now would pay.
@@ -498,7 +549,7 @@ contract SwarmDerby {
         if (d.length == 0 || d[d.length - 1] != day) d.push(day);
     }
 
-    // ───────── admin (cannot touch pots or vaults) ─────────
+    // ───────── admin (cannot touch pots or vaults; a house key change waits KEY_DELAY) ─────────
 
     /// @notice Prices apply to every later purchase. They can never go under
     ///         MIN_TURN_PRICE a turn, so turns never become free.
@@ -506,6 +557,39 @@ contract SwarmDerby {
         _checkPrices(single, pack);
         singlePrice = single;
         packPrice = pack;
+    }
+
+    /// @notice Propose a new house key. Anyone can activate it KEY_DELAY later. A new proposal
+    ///         replaces the old one and restarts the delay.
+    function proposeHouseKey(bytes calldata key) external onlyOwner {
+        _checkKey(key);
+        pendingHouseKey = key;
+        pendingHouseKeyAt = block.timestamp + KEY_DELAY;
+        emit HouseKeyProposed(keccak256(key), pendingHouseKeyAt);
+    }
+
+    function activateHouseKey() external {
+        if (pendingHouseKeyAt == 0 || block.timestamp < pendingHouseKeyAt) revert KeyNotReady();
+        houseKey = pendingHouseKey;
+        delete pendingHouseKey;
+        pendingHouseKeyAt = 0;
+        emit HouseKeySet(keccak256(houseKey));
+    }
+
+    /// @notice Stop all draws at once (for a leaked key) and drop any proposal. Swings then
+    ///         come back as refunds. Steering is impossible without a key; a new key needs KEY_DELAY.
+    function revokeHouseKey() external onlyOwner {
+        delete houseKey;
+        delete pendingHouseKey;
+        pendingHouseKeyAt = 0;
+        emit HouseKeySet(bytes32(0));
+    }
+
+    /// @dev Shape only: 256 bytes, top bit set, odd. The contract can't check how the key was made.
+    function _checkKey(bytes memory key) internal pure {
+        if (key.length != HouseDraw.KEY_BYTES || uint8(key[0]) < 0x80 || uint8(key[key.length - 1]) & 1 == 0) {
+            revert BadKey();
+        }
     }
 
     function withdrawOps(address to, uint256 amount) external onlyOwner {

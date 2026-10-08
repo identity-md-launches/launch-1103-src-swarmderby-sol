@@ -33,7 +33,7 @@ Create two **public** GitHub repos from the two folders:
 - `swarm-derby-contracts` (Foundry repo at the root)
 - `swarm-derby-site` (static site at the root)
 
-Check: `forge test` passes (54), and `python3 build.py game.html ../index.html`, run in the
+Check: `forge test` passes (114), and `python3 build.py game.html ../index.html`, run in the
 site repo's `dev/` folder, reproduces `index.html` exactly.
 
 ## 2. Readiness check (free)
@@ -54,7 +54,7 @@ Then `job.open` with:
 
 ```json
 {
-  "objective": "Audit SwarmDerby (src/SwarmDerby.sol, src/DerbyOdds.sol): IMD turn purchases and the 40/45/10/5 split into per-day pots, commit-reveal swing randomness using Robinhood Chain (Arbitrum Nitro) block hashes via ArbSys, EIP-712 session-key consent, the 20-swing arcade cap, the on-chain top-10 boards, slam vault payouts, and settleNextDay's in-order daily payout math and rollover.",
+  "objective": "Audit SwarmDerby (src/SwarmDerby.sol, src/DerbyOdds.sol): IMD turn purchases and the 40/45/10/5 split into per-day pots, commit-reveal swings decided by a house draw (src/HouseDraw.sol: a 2048-bit RSASSA-PKCS1-v1_5 SHA-256 signature over drawMessage, checked with the modexp precompile; refund when no draw comes within DRAW_WINDOW; foul when a drawn swing is not revealed in time), EIP-712 session-key consent, the 20-swing arcade cap, the on-chain top-10 boards, slam vault payouts, and settleNextDay's in-order daily payout math and rollover.",
   "template": "audit",
   "repoUrl": "https://github.com/OWNER/swarm-derby-contracts",
   "baseCommit": "COMMIT_FROM_IMPORT"
@@ -62,7 +62,8 @@ Then `job.open` with:
 ```
 
 Read the report at `GET /jobs/:id/report.md`. Fix critical and high findings, rerun
-`forge test` and the `e2e/` rehearsal, push, and re-audit if the changes were large.
+`forge test` and the `e2e/` rehearsal,
+push, and re-audit if the changes were large.
 Any change to `DerbyOdds.sol` must be mirrored in the site's odds engine; the parity test
 catches drift.
 
@@ -76,6 +77,8 @@ from "Before you start", no token).
 `https://robinhoodchain.blockscout.com`:
 
 - `owner()` is the chosen wallet; `imd()` is the Robinhood IMD address
+- `houseKey()` is the house service's modulus, and `pendingHouseKeyAt()` is 0
+- the house service draws a test swing within a few seconds
 - `singlePrice()` = 0.15e18, `packPrice()` = 0.5e18, `ARCADE_DAILY_CAP()` = 20
 
 ## 5. Point the site at the contract
@@ -124,7 +127,7 @@ On the hosted site, with a fresh wallet holding ~1 Robinhood IMD and a little ET
 
 ## 8. First payout (the next day)
 
-After 00:00 UTC, open the leaderboard: "Pay the winners" appears for each league with a
+After 00:10 UTC (the last draws and reveals take up to 10 minutes), open the leaderboard: "Pay the winners" appears for each league with a
 finished day. Press it (or call `settleNextDay(league)` from code). Check the winners and the
 tip on the explorer, and that the button moves on to the next open day or disappears.
 

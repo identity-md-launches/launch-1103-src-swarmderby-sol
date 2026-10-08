@@ -3,13 +3,18 @@
 Robinhood Chain mainnet (chain id 4663) · IMD `0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127` ·
 public RPC `https://rpc.mainnet.chain.robinhood.com` · explorer `https://robinhoodchain.blockscout.com`
 
+This guide describes SwarmDerby v2: rolls use a signed house draw (`src/HouseDraw.sol`,
+`house/`). The contract live at `0xBa58BC6b5aCf8043DAEa2Bf1BF6C1c09cF84b03C` is v1. v2 is not
+deployed yet.
+
 ## What's in this folder
 
 | | |
 |---|---|
 | `src/SwarmDerby.sol` | the game: two leagues, turns, swings, scoreboards, slam vaults, settlement |
+| `src/HouseDraw.sol` | checks the house's RSA signature for a swing (the draw) |
 | `src/DerbyOdds.sol` | the odds table; the browser runs identical math |
-| `test/` | 54 Foundry tests (two fuzzed) |
+| `test/` | 114 Foundry tests (two fuzzed); `test/HouseKey.sol` holds the public test-only house key |
 | `e2e/` | full rehearsal on a local devnet with the real page and a scripted wallet |
 | `imd-check.mjs` | free readiness check against IMD's API |
 | `HANDOFF.md` | ordered go-live checklist for the swarm agent |
@@ -50,12 +55,16 @@ never below 0.01 IMD a turn (0.05 a pack). Every purchase is split 40% burned, 4
 league's pot for the current UTC day, 10% to its slam vault, 5% ops. A grand slam (550+ ft)
 instantly pays 10% of its league's slam vault.
 
-**A swing, with no server.** The player picks a secret salt and calls
+**A swing.** The player picks a secret salt and calls
 `swing(league, quality, velo, commit)` with `commit = keccak256(abi.encode(salt, player))`.
-The roll uses the hash of the block 5 blocks later (~0.5s). The player then calls
-`finalize(swingId, salt)`. Not revealed within 255 blocks (~25s) counts as a foul, and
-`expire` closes it out. Nobody, including the deployer, can predict or steer a roll. A swing
-scores on the UTC day it was committed, the same day its arcade cap slot was used.
+The house service signs `drawMessage(swingId)` with its 2048-bit RSA key (RSASSA-PKCS1-v1_5,
+SHA-256) and sends `draw(swingId, sig)`; the contract checks the signature against
+`houseKey`. The player then calls `finalize(swingId, salt)`, and the roll uses
+`keccak256(salt, keccak256(sig))`. The player can't make the signature, and the house can't
+choose it (one valid signature per swing) or see the salt. A swing not drawn within 5 minutes
+gets its turn back through `expire`. A drawn swing not revealed within 10 minutes of the
+commit counts as a foul, and `expire` closes it out. A swing scores on the UTC day it was
+committed, the same day its arcade cap slot was used.
 
 **Skill and the odds.** `quality` (1-100, from exit velo and timing) and `velo` (0-100) come
 from the client, so a script can always send 100: it plays like a perfect batter. The odds
@@ -74,7 +83,7 @@ the key can leave with `leaveSession()`, and the player can revoke it with
 leaderboards with one call per league and no indexer. The same board pays the day's prizes.
 
 **Daily payout.** Each UTC day with a purchase or a swing joins its league's queue. When a day
-is over and its last swing can no longer be revealed (255 blocks after its target),
+is over and its last swing can no longer be drawn or revealed (10 minutes after its commit),
 anyone calls `settleNextDay(league)`. The oldest open day is paid: 90% of that day's pot plus
 rollover goes to the board's top 3 (60 / 25 / 15) after a 0.5% tip to the caller. The other
 10%, unfilled places and any prize the token refuses to deliver roll over to the next day. A
@@ -95,7 +104,7 @@ Dry-run with `POST /requests/check` before paying, and confirm chain 4663 lists
 
 ```json
 {
-  "objective": "Deploy SwarmDerby (src/SwarmDerby.sol) unchanged to Robinhood Chain. Deploy only SwarmDerby. Do not create or launch any token, distributor or pool. Constructor arguments in order: owner_ = $owner; imd_ = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127; singlePrice_ = 150000000000000000; packPrice_ = 500000000000000000.",
+  "objective": "Deploy SwarmDerby (src/SwarmDerby.sol) unchanged to Robinhood Chain. Deploy only SwarmDerby. Do not create or launch any token, distributor or pool. Constructor arguments in order: owner_ = $owner; imd_ = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127; singlePrice_ = 150000000000000000; packPrice_ = 500000000000000000; houseKey_ = HOUSE_MODULUS_HEX.",
   "repoUrl": "https://github.com/YOU/swarm-derby-contracts",
   "baseCommit": "COMMIT_FROM_IMPORT",
   "contracts": ["src/SwarmDerby.sol"],
@@ -105,6 +114,11 @@ Dry-run with `POST /requests/check` before paying, and confirm chain 4663 lists
   "github": true
 }
 ```
+
+`HOUSE_MODULUS_HEX` is the 256-byte modulus (`0x` and 512 hex digits) that the house service's
+key generator prints (`house/keygen.mjs`). Start the house service (`house/README.md`) before
+the site points at the contract: without it, every swing waits 5 minutes and comes back as a
+refund.
 
 IMD reviews and may adapt the code before deploying: **read the adapt step's diff**. The odds
 math must stay identical to the browser engine (`forge test` checks this).
@@ -117,7 +131,7 @@ address is set the page stays practice-only.
 
 ## 5. Paying out
 
-Nothing to schedule and no oracle. After 00:00 UTC (plus ~25s for the last reveals), the
+Nothing to schedule, and payouts need no oracle. After 00:00 UTC (plus 10 minutes for the last draws and reveals), the
 game page reads `nextSettlement(league)` and shows any visitor a **Pay the winners** button
 in the leaderboard. Whoever presses it calls `settleNextDay(league)` from their own wallet and
 earns 0.5% of the payout. Agents can do the same from code. If no one does, the day waits in
@@ -125,14 +139,30 @@ the queue; nothing expires.
 
 ## Known limits
 
-- Rolls mix the player's committed salt with a future L2 block hash; neither the player nor
-  Robinhood's sequencer can steer one alone.
+- Rolls mix the player's committed salt with the house draw. A player alone, the house
+  alone or the sequencer alone can't steer a roll. What remains is trust:
+  - The house must stay online. If it stops, swings come back as refunds after 5 minutes.
+  - The holder of the house key must not play. With the key, a player can compute the draw of
+    a planned swing before sending it.
+  - A `draw` transaction must never land and revert: its calldata would show the draw while
+    the swing can still be refunded. The house simulates each draw first and sets gas from an
+    estimate with a margin.
+  - The house sees each swing's player and can hold back draws for chosen players. Those
+    swings are refunded, not lost.
+  - A sequencer that works with a player can delay a bad draw past 5 minutes to force a
+    refund.
+- Each commit can be used once (`CommitUsed`). Clients use a fresh random 32-byte salt per
+  swing.
 - Swing quality is reported by the client. Scripts play as perfect batters; the odds table
   bounds what that is worth, and the arcade cap applies to everyone.
 - The arcade cap is per wallet. Multiple wallets get around it at full price.
 - The owner can change prices (never below 0.01 IMD a turn), withdraw the 5% ops share and
   move ownership in two steps (`transferOwnership`, then `acceptOwnership` from the new
   address). The owner cannot touch pots or vaults, and ownership cannot be renounced.
+- The owner can change the house key only with notice: `proposeHouseKey`, then anyone calls
+  `activateHouseKey` after `KEY_DELAY` (2 days). Watch `HouseKeyProposed`: a key the owner
+  holds would let the owner's accomplice steer rolls. `revokeHouseKey` stops all draws at
+  once (for a leaked key); swings are then refunded until a new key is active.
 - A purchase pays the price in force when it lands, so a price change also applies to a buy
   already sent from the page. Change prices only when nobody is buying.
 - The Robinhood IMD token's owner can block addresses or stop transfers. Blocking the derby
@@ -164,7 +194,7 @@ Constructor arguments, in order:
 |---|---|
 | `owner_` | `$owner`, the actual owner supplied to the launch request |
 | `imd_` | `0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127` (Robinhood IMD) |
-| `derby_` | `0xBa58BC6b5aCf8043DAEa2Bf1BF6C1c09cF84b03C` (existing SwarmDerby from the WP3 specs) |
+| `derby_` | `0xBa58BC6b5aCf8043DAEa2Bf1BF6C1c09cF84b03C` (SwarmDerby v1). `derby` is immutable: with SwarmDerby v2, deploy DerbyAuction again with the v2 address here and in the launch body |
 | `studio_` | `$owner`; any nonzero address is allowed and the owner can change it later |
 | `buildFee_` | `0` |
 
@@ -241,15 +271,13 @@ forge test --out test/scratch/out --cache-path test/scratch/cache
 ```
 
 `test/DerbyAuction.t.sol` covers WP3's eight Done-when items and the audit fixes, including
-real SwarmDerby commit/reveal swings and a randomized conservation check after bids,
-settlement, veto, bonus payout, reclaim and refund withdrawal. Forge 1.8.3 with Solidity
-0.8.26 passes **94 tests, 0 failed** (40 auction tests and the 54 SwarmDerby tests). Each
-fuzz test runs 256 cases.
-
-**Chain id in tests:** Foundry 1.8.5 and later
-[intercept `arbBlockNumber`](https://github.com/foundry-rs/foundry/blob/v1.8.5/crates/evm/evm/src/inspectors/stack.rs#L2087)
-on chain 4663, which bypasses an etched ArbSys mock. Both test files therefore select chain
-id 31337 before they etch MockArbSys. That is the only change to `test/SwarmDerby.t.sol`.
+commit, draw and reveal swings on `FakeDrawDerby` and a randomized conservation check after bids,
+settlement, veto, bonus payout, reclaim and refund withdrawal. These tests run against
+`FakeDrawDerby` (`test/HouseKey.sol`), a SwarmDerby that accepts any 256-byte draw, so a test
+can pick an outcome. `test/HouseDraw.t.sol` and `test/SwarmDerbyDraw.t.sol` check the real
+signature path with the test house key. Forge 1.5.1 with Solidity 0.8.26 passes
+**114 tests, 0 failed** (40 auction, 54 SwarmDerby, 6 HouseDraw and 14 house draw tests).
+Each fuzz test runs 256 cases.
 
 WP3 Done-when evidence (function names in `test/DerbyAuction.t.sol`):
 
@@ -262,4 +290,4 @@ WP3 Done-when evidence (function names in `test/DerbyAuction.t.sol`):
 | 5. Real closure, tip and top-three split | `test_realSwingsPayOnlyAfterArcadeDayClosedAndOnlyTopThree` |
 | 6. Agent isolation, short/empty boards and carry | `test_agentScoresAndOtherDaysNeverAffectArcadeBonus`, `test_onePlayerCarriesUnfilledSharesIntoNextAuction`, `test_twoPlayersCarryUnfilledShareIntoNextAuction`, `test_emptyArcadeWithAgentPlayersCarriesEverythingWithoutTip`, `test_failedPrizeAndRoundingDustCarryWithoutBlockingOthers`, `test_settleOnOrAfterThemeDayKeepsCarryForLaterBoards` |
 | 7. Veto/reclaim restrictions and carry protection | `test_vetoOwnerOnlyBeforeThemeDayReturnsOwnNetBidNotCarry`, `test_vetoRejectsUnsettledEmptyAndThemeDayBoundary`, `test_reclaimGraceBoundaryReturnsOwnNetBidNotCarryToWinner`, `test_reclaimRejectsUnsettledEmptyAndAlreadyPaidAuctions`, `test_lateSettleKeepsTheFullReclaimGraceForTheBoard` |
-| 8. Conservation, the SwarmDerby regression suite and constructor isolation | `testFuzz_conservationAcrossAuctionSequences`, `test_constructorStoresArgumentsWithoutAnyDependencyCalls`, plus all 54 tests in `test/SwarmDerby.t.sol` |
+| 8. Conservation, the SwarmDerby regression suite and constructor isolation | `testFuzz_conservationAcrossAuctionSequences`, `test_constructorStoresArgumentsWithoutAnyDependencyCalls`, plus all tests in `test/SwarmDerby.t.sol` |

@@ -2,6 +2,9 @@ import json, threading, time, urllib.request
 from playwright.sync_api import sync_playwright
 exec(open('e2e/play.py').read().split('url=')[0])  # rpc(), miner, SHIM
 url=f"file://{__import__('os').path.abspath(__import__('os').environ.get('SITE', '../swarm-derby-site/index.html'))}?network=local&rpc={RPC}&derby={A['derby']}&imd={A['imd']}"
+# a fresh UTC day on the devnet: the earlier scripts used part of today's 20 arcade swings
+day=int(rpc('eth_getBlockByNumber',['latest',False])['timestamp'],16)//86400
+rpc('evm_setNextBlockTimestamp',[(day+1)*86400+5]); rpc('evm_mine')
 with sync_playwright() as p:
     b=p.chromium.launch(); pg=b.new_page(); errs=[]; pg.on('pageerror', lambda e: errs.append(str(e)))
     pg.route('**/cdn.tailwindcss.com/**', lambda r: r.abort()); pg.route('**/fonts.g*/**', lambda r: r.abort())

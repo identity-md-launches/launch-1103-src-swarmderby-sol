@@ -19,6 +19,7 @@ Written against `swarm-derby-contracts@b1a01be` (54 tests; SwarmDerby live at
 | **WP4** | [Auction UI](WP4-auction-ui.md): bid drawer, refunds, "designed by", pay-bonus button | site | WP1, deployed WP3 | yes |
 | **WP5** | [Nightly theme job](WP5-theme-build-job.md): one `job.continue` that builds the pack and republishes | site | WP1 | no |
 | **WP6** | [Operator runbook](WP6-operator-runbook.md): timeline, budget, escalation | — | all | — |
+| **WP7** | House draw: SwarmDerby v2 with a signed house draw; not part of Theme Day, R1 does not apply | both | — | yes |
 
 **Start with WP1.** It moves no money and can't break the live game: a bad or missing pack
 falls back to the built-in GUS. WP3 can run alongside it (contracts repo only) but needs the

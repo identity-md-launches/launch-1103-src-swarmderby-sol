@@ -5,25 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {DerbyAuction, ISwarmDerby} from "../src/DerbyAuction.sol";
 import {SwarmDerby, IERC20} from "../src/SwarmDerby.sol";
 import {DerbyOdds} from "../src/DerbyOdds.sol";
-
-// Same ArbSys pattern as SwarmDerby.t.sol: the only mocked game dependency.
-contract AuctionArbSys {
-    uint256 public arbBlockNumber;
-    mapping(uint256 => bytes32) public hashes;
-
-    function setBlock(uint256 n) external {
-        arbBlockNumber = n;
-    }
-
-    function setHash(uint256 n, bytes32 h) external {
-        hashes[n] = h;
-    }
-
-    function arbBlockHash(uint256 n) external view returns (bytes32) {
-        require(n < arbBlockNumber && n + 256 >= arbBlockNumber, "range");
-        return hashes[n] != bytes32(0) ? hashes[n] : keccak256(abi.encode("blk", n));
-    }
-}
+import {FakeDrawDerby, HouseKeyTest} from "./HouseKey.sol";
 
 contract AuctionToken {
     mapping(address => uint256) public balanceOf;
@@ -127,8 +109,7 @@ contract AuctionNeverCall {
     }
 }
 
-contract DerbyAuctionTest is Test {
-    AuctionArbSys internal arb = AuctionArbSys(address(100));
+contract DerbyAuctionTest is HouseKeyTest {
     AuctionToken internal imd;
     SwarmDerby internal derby;
     DerbyAuction internal sale;
@@ -140,14 +121,9 @@ contract DerbyAuctionTest is Test {
     uint256 internal constant DAY = 20_400;
 
     function setUp() public {
-        // Use a vanilla local chain: recent Foundry versions intercept ArbSys on 4663,
-        // bypassing the etched mock's arbBlockNumber even without an RPC fork.
-        vm.chainId(31337);
         vm.warp(_start(DAY));
-        vm.etch(address(100), address(new AuctionArbSys()).code);
-        arb.setBlock(1_000);
         imd = new AuctionToken();
-        derby = new SwarmDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether);
+        derby = new FakeDrawDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether);
         sale = new DerbyAuction(address(this), IERC20(address(imd)), ISwarmDerby(address(derby)), studio, 0);
     }
 
@@ -197,26 +173,24 @@ contract DerbyAuctionTest is Test {
         vm.stopPrank();
     }
 
-    /// Play an actual commit and reveal. Control only ArbSys's future hash, as the existing tests do.
+    /// Play an actual commit, draw and reveal. Control only the draw, as the SwarmDerby tests do.
     function _homer(uint8 league, address who, uint8 wantedTier) internal returns (uint16 feet) {
         _buy(who, league);
         uint256 id = derby.nextSwingId();
         bytes32 salt = keccak256(abi.encode("auction integration", id, who));
         bytes32 commitment = derby.commitFor(salt, who);
-        uint256 target = arb.arbBlockNumber() + derby.REVEAL_DELAY();
         vm.prank(who);
         assertEq(derby.swing(league, 100, 100, commitment), id);
-        bytes32 hash;
+        bytes memory sig;
         for (uint256 i;; ++i) {
-            hash = keccak256(abi.encode("future block", id, i));
-            (uint8 tier, uint16 distance) = DerbyOdds.roll(derby.swingSeed(salt, hash), id, 100, 100);
+            sig = _fakeSig(keccak256(abi.encode("draw", id, i)));
+            (uint8 tier, uint16 distance) = DerbyOdds.roll(derby.swingSeed(salt, keccak256(sig)), id, 100, 100);
             if (tier == wantedTier) {
                 feet = distance;
                 break;
             }
         }
-        arb.setHash(target, hash);
-        arb.setBlock(target + 1);
+        derby.draw(id, sig);
         (uint8 actualTier, uint16 actualFeet) = derby.finalize(id, salt);
         assertEq(actualTier, wantedTier);
         assertEq(actualFeet, feet);
@@ -233,8 +207,10 @@ contract DerbyAuctionTest is Test {
     }
 
     function _close(uint256 day) internal {
-        vm.warp((day + 1) * 1 days);
-        arb.setBlock(arb.arbBlockNumber() + 1_000);
+        // Midnight, or later if the day's last swing can still be drawn or revealed.
+        uint256 at = (day + 1) * 1 days;
+        uint256 lastReveal = derby.dayLastCommit(0, day) + derby.DRAW_WINDOW() + derby.REVEAL_WINDOW() + 1;
+        vm.warp(at > lastReveal ? at : lastReveal);
         assertTrue(derby.dayClosed(0, day));
     }
 
@@ -582,10 +558,11 @@ contract DerbyAuctionTest is Test {
         assertEq(imd.balanceOf(alice), 10 ether);
         vm.revertToState(snap);
         _pay(DAY);
+        (address[] memory ranked, ) = derby.board(0, DAY);
         assertEq(imd.balanceOf(payer), 0.05 ether);
-        assertEq(imd.balanceOf(_player(0)), 5.97 ether);
-        assertEq(imd.balanceOf(_player(1)), 2.4875 ether);
-        assertEq(imd.balanceOf(_player(2)), 1.4925 ether);
+        assertEq(imd.balanceOf(ranked[0]), 5.97 ether);
+        assertEq(imd.balanceOf(ranked[1]), 2.4875 ether);
+        assertEq(imd.balanceOf(ranked[2]), 1.4925 ether);
         assertEq(imd.balanceOf(alice), 0);
     }
 
@@ -632,7 +609,7 @@ contract DerbyAuctionTest is Test {
 
     function test_realSwingsPayOnlyAfterArcadeDayClosedAndOnlyTopThree() public {
         _settled(10 ether);
-        vm.warp(DAY * 1 days);
+        vm.warp((DAY + 1) * 1 days - 1); // the day's last second
         _board(4);
         (address[] memory players, uint256[] memory scores) = derby.board(0, DAY);
         assertEq(players.length, 4);
@@ -641,14 +618,13 @@ contract DerbyAuctionTest is Test {
         }
         vm.expectRevert(DerbyAuction.DayNotClosed.selector);
         sale.payBonus(DAY);
-        vm.warp((DAY + 1) * 1 days);
-        uint256 last = derby.dayLastTarget(0, DAY);
-        arb.setBlock(last + 255);
+        uint256 last = derby.dayLastCommit(0, DAY);
+        vm.warp(last + derby.DRAW_WINDOW() + derby.REVEAL_WINDOW());
         assertFalse(derby.dayClosed(0, DAY));
         vm.expectRevert(DerbyAuction.DayNotClosed.selector);
         sale.payBonus(DAY);
         assertFalse(_state(DAY).paid);
-        arb.setBlock(last + 256);
+        vm.warp(last + derby.DRAW_WINDOW() + derby.REVEAL_WINDOW() + 1);
         assertTrue(derby.dayClosed(0, DAY));
         assertEq(derby.settledDays(0), 0); // closure does not require the game's pot to be paid
         address[] memory winners = new address[](3);

@@ -13,11 +13,11 @@ def deploy(bytecode):
         rc=rpc('eth_getTransactionReceipt',[h])
         if rc: return rc['contractAddress']
         time.sleep(0.1)
-arbsys=art('Mocks.sol','LiveArbSys')['deployedBytecode']['object']
-rpc('anvil_setCode',['0x0000000000000000000000000000000000000064', arbsys])
 imd=deploy(art('Mocks.sol','MockIMD')['bytecode']['object'])
-enc=subprocess.check_output(['cast','abi-encode','c(address,address,uint256,uint256)',
-    acct, imd, str(15*10**16), str(5*10**17)]).decode().strip()
+# The house key: HOUSE_MODULUS (from house/keygen.mjs), or the fixed test key that the tests use.
+house=__import__('os').environ.get('HOUSE_MODULUS') or subprocess.check_output(['node','test/fixtures/house-test-key.mjs','modulus']).decode().strip()
+enc=subprocess.check_output(['cast','abi-encode','c(address,address,uint256,uint256,bytes)',
+    acct, imd, str(15*10**16), str(5*10**17), house]).decode().strip()
 derby=deploy(art('SwarmDerby.sol','SwarmDerby')['bytecode']['object']+enc[2:])
 # mint 10 IMD to player
 data=subprocess.check_output(['cast','calldata','mint(address,uint256)',acct,str(10*10**18)]).decode().strip()
