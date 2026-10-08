@@ -10,10 +10,23 @@ contract MockIMD {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     mapping(address => bool) public blocked;
+    mapping(address => bool) public odd; // transfers to these answer the word 2, not a bool
     function block_(address a) external { blocked[a] = true; }
+    function odd_(address a) external { odd[a] = true; }
     function mint(address to, uint256 a) external { balanceOf[to] += a; }
     function approve(address s, uint256 a) external returns (bool) { allowance[msg.sender][s] = a; return true; }
-    function transfer(address to, uint256 a) external returns (bool) { require(!blocked[to], "blocked"); balanceOf[msg.sender] -= a; balanceOf[to] += a; return true; }
+    function transfer(address to, uint256 a) external returns (bool) {
+        require(!blocked[to], "blocked");
+        if (odd[to]) {
+            assembly {
+                mstore(0, 2)
+                return(0, 32)
+            }
+        }
+        balanceOf[msg.sender] -= a;
+        balanceOf[to] += a;
+        return true;
+    }
     function transferFrom(address f, address to, uint256 a) external returns (bool) {
         allowance[f][msg.sender] -= a; balanceOf[f] -= a; balanceOf[to] += a; return true;
     }
@@ -426,6 +439,17 @@ contract SwarmDerbyTest is HouseKeyTest {
         assertEq(derby.vault(0), 1.5 ether);
         assertEq(derby.dayScore(0, DAY0, player), feet);
         assertEq(imd.balanceOf(address(derby)), derby.pot(0) + derby.vault(0) + derby.opsBalance());
+    }
+
+    /// A token that answers a transfer with a word other than 0 or 1 counts as a refusal.
+    function test_oddTransferAnswerKeepsSlamPrize() public {
+        _buy(player, 0, 100);
+        _rig(0, 1, DerbyOdds.SLAM, "slam");
+        uint256 id = _swing(1, 100, SALT);
+        imd.odd_(player);
+        (uint8 tier, ) = derby.finalize(id, SALT);
+        assertEq(tier, DerbyOdds.SLAM);
+        assertEq(derby.vault(0), 1.5 ether);
     }
 
     function test_swingStoresVelo() public {

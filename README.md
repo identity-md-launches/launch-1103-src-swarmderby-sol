@@ -6,7 +6,7 @@ feet), commit-reveal swings decided by a house draw that the contract verifies, 
 scoreboards, slam vaults, and daily payouts from those scoreboards that anyone can trigger.
 
 ```
-forge test               # 114 tests, two fuzzed (forge-std is vendored in lib/)
+forge test               # 117 tests, two fuzzed (forge-std is vendored in lib/)
 node imd-check.mjs       # free readiness check against IMD
 ```
 

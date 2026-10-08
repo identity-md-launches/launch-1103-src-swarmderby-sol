@@ -29,8 +29,10 @@ interface IERC20 {
 ///           contract checks the signature (HouseDraw), and the player calls finalize(swingId,
 ///           salt). The roll uses keccak256(salt, keccak256(sig)). The player can't make the
 ///           signature, the house can't choose it (one valid signature per swing) and doesn't
-///           know the salt, and an unrevealed draw counts as a foul, so nobody can steer a roll
-///           and hiding a bad one never pays. No draw within DRAW_WINDOW gives the turn back.
+///           know the salt, and an unrevealed draw counts as a foul, so a player without the
+///           key can't steer a roll and hiding a bad reveal never pays. The key holder can
+///           compute every draw, so it must not play, and it can hold back draws: that is the
+///           trust the house carries (DEPLOY.md). No draw within DRAW_WINDOW gives the turn back.
 ///           A swing scores on the UTC day it was committed.
 ///  Slams:   a 550+ ft swing pays 10% of its league's vault instantly.
 ///  Daily:   the contract's own board ranks each day. Once a day is over and its last swing
@@ -63,6 +65,8 @@ contract SwarmDerby {
     /// @notice A new house key takes effect only this long after the owner proposes it, so
     ///         players can see a key change coming and stop playing.
     uint256 public constant KEY_DELAY = 2 days;
+    /// @notice A proposed key can be activated only within KEY_WINDOW after its delay ends.
+    uint256 public constant KEY_WINDOW = 1 days;
     uint256 public constant BOARD_SIZE = 10;
 
     bytes32 internal constant DOMAIN_TYPEHASH =
@@ -101,7 +105,7 @@ contract SwarmDerby {
     bytes public pendingHouseKey;    // proposed by the owner
     uint256 public pendingHouseKeyAt; // when pendingHouseKey can be activated; 0 if none
     /// @notice Commits already used. A reused salt would show the house a pending result.
-    mapping(bytes32 => bool) public commitUsed;
+    mapping(address => mapping(bytes32 => bool)) public commitUsed; // player => commit => used
     mapping(uint8 => mapping(address => uint256)) public turns; // league => player => turns
     mapping(uint256 => mapping(address => uint256)) public arcadeSwings; // day => player => swings
 
@@ -137,7 +141,7 @@ contract SwarmDerby {
     event SwingDrawn(uint256 indexed swingId, bytes32 drawHash);
     event SwingRefunded(uint256 indexed swingId, address indexed player, uint8 league);
     event HouseKeySet(bytes32 keyHash); // bytes32(0) when revoked
-    event HouseKeyProposed(bytes32 keyHash, uint256 activeAt);
+    event HouseKeyProposed(bytes32 keyHash, uint256 activeAt); // (0, 0) when cancelled
     event SwingResolved(uint256 indexed swingId, address indexed player, uint8 tier, uint16 feet);
     /// @notice Every homer, either league, credited to the UTC day of its commit.
     event Dinger(address indexed player, uint8 indexed league, uint256 indexed day, uint256 feet);
@@ -164,6 +168,8 @@ contract SwarmDerby {
     error BadKey();
     error CommitUsed();
     error KeyNotReady();
+    error KeyExpired();
+    error NoHouseKey();
     error BadSession();
     error TransferFailed();
     error NothingToSettle();
@@ -318,8 +324,9 @@ contract SwarmDerby {
             return swingId;
         }
         if (commit == bytes32(0)) revert BadCommit();
-        if (commitUsed[commit]) revert CommitUsed();
-        commitUsed[commit] = true;
+        if (houseKey.length == 0) revert NoHouseKey(); // revoked: no draw could come
+        if (commitUsed[player][commit]) revert CommitUsed();
+        commitUsed[player][commit] = true;
 
         uint64 nowTs = uint64(block.timestamp);
         _markDay(league, day);
@@ -559,8 +566,8 @@ contract SwarmDerby {
         packPrice = pack;
     }
 
-    /// @notice Propose a new house key. Anyone can activate it KEY_DELAY later. A new proposal
-    ///         replaces the old one and restarts the delay.
+    /// @notice Propose a new house key. Anyone can activate it from KEY_DELAY later, for
+    ///         KEY_WINDOW. A new proposal replaces the old one and restarts the delay.
     function proposeHouseKey(bytes calldata key) external onlyOwner {
         _checkKey(key);
         pendingHouseKey = key;
@@ -568,8 +575,17 @@ contract SwarmDerby {
         emit HouseKeyProposed(keccak256(key), pendingHouseKeyAt);
     }
 
+    /// @notice Drop the proposed key.
+    function cancelHouseKey() external onlyOwner {
+        if (pendingHouseKeyAt == 0) revert KeyNotReady();
+        delete pendingHouseKey;
+        pendingHouseKeyAt = 0;
+        emit HouseKeyProposed(bytes32(0), 0);
+    }
+
     function activateHouseKey() external {
         if (pendingHouseKeyAt == 0 || block.timestamp < pendingHouseKeyAt) revert KeyNotReady();
+        if (block.timestamp > pendingHouseKeyAt + KEY_WINDOW) revert KeyExpired();
         houseKey = pendingHouseKey;
         delete pendingHouseKey;
         pendingHouseKeyAt = 0;
@@ -646,6 +662,6 @@ contract SwarmDerby {
     function _trySend(address to, uint256 amount) internal returns (bool) {
         if (amount == 0) return true;
         (bool ok, bytes memory data) = address(imd).call(abi.encodeCall(IERC20.transfer, (to, amount)));
-        return ok && (data.length == 0 || (data.length == 32 && abi.decode(data, (bool))));
+        return ok && (data.length == 0 || (data.length == 32 && abi.decode(data, (uint256)) == 1));
     }
 }

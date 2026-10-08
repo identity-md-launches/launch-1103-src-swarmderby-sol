@@ -14,7 +14,7 @@ deployed yet.
 | `src/SwarmDerby.sol` | the game: two leagues, turns, swings, scoreboards, slam vaults, settlement |
 | `src/HouseDraw.sol` | checks the house's RSA signature for a swing (the draw) |
 | `src/DerbyOdds.sol` | the odds table; the browser runs identical math |
-| `test/` | 114 Foundry tests (two fuzzed); `test/HouseKey.sol` holds the public test-only house key |
+| `test/` | 117 Foundry tests (two fuzzed); `test/HouseKey.sol` holds the public test-only house key |
 | `e2e/` | full rehearsal on a local devnet with the real page and a scripted wallet |
 | `imd-check.mjs` | free readiness check against IMD's API |
 | `HANDOFF.md` | ordered go-live checklist for the swarm agent |
@@ -143,7 +143,12 @@ the queue; nothing expires.
   alone or the sequencer alone can't steer a roll. What remains is trust:
   - The house must stay online. If it stops, swings come back as refunds after 5 minutes.
   - The holder of the house key must not play. With the key, a player can compute the draw of
-    a planned swing before sending it.
+    a planned swing before sending it, commit only salts that win, and hold back the draws of
+    swings that lose (they come back as refunds).
+  - The house signs only swings that `QUORUM` (default 3) independent RPCs report the same
+    way. RPCs that all lie together could get a signature for a swing that does not exist yet.
+    The draw is simulated and sent through `RPC_URL` (the chain's own RPC), which sees the
+    signature a moment before the block does.
   - A `draw` transaction must never land and revert: its calldata would show the draw while
     the swing can still be refunded. The house simulates each draw first and sets gas from an
     estimate with a margin.
@@ -151,8 +156,9 @@ the queue; nothing expires.
     swings are refunded, not lost.
   - A sequencer that works with a player can delay a bad draw past 5 minutes to force a
     refund.
-- Each commit can be used once (`CommitUsed`). Clients use a fresh random 32-byte salt per
-  swing.
+- Each player can use a commit once (`CommitUsed`). Clients use a fresh random 32-byte salt
+  per swing. Another wallet that copies a pending commit spends its own turn on a swing it
+  can never reveal.
 - Swing quality is reported by the client. Scripts play as perfect batters; the odds table
   bounds what that is worth, and the arcade cap applies to everyone.
 - The arcade cap is per wallet. Multiple wallets get around it at full price.
@@ -160,9 +166,11 @@ the queue; nothing expires.
   move ownership in two steps (`transferOwnership`, then `acceptOwnership` from the new
   address). The owner cannot touch pots or vaults, and ownership cannot be renounced.
 - The owner can change the house key only with notice: `proposeHouseKey`, then anyone calls
-  `activateHouseKey` after `KEY_DELAY` (2 days). Watch `HouseKeyProposed`: a key the owner
-  holds would let the owner's accomplice steer rolls. `revokeHouseKey` stops all draws at
-  once (for a leaked key); swings are then refunded until a new key is active.
+  `activateHouseKey` after `KEY_DELAY` (2 days) and within `KEY_WINDOW` (1 day) after that;
+  the owner can `cancelHouseKey` before. Watch `HouseKeyProposed`: a key the owner holds
+  would let the owner's accomplice steer rolls. `revokeHouseKey` stops all draws at once (for
+  a leaked key); open swings are then refunded and new swings revert `NoHouseKey` until a
+  new key is active.
 - A purchase pays the price in force when it lands, so a price change also applies to a buy
   already sent from the page. Change prices only when nobody is buying.
 - The Robinhood IMD token's owner can block addresses or stop transfers. Blocking the derby
@@ -276,7 +284,7 @@ settlement, veto, bonus payout, reclaim and refund withdrawal. These tests run a
 `FakeDrawDerby` (`test/HouseKey.sol`), a SwarmDerby that accepts any 256-byte draw, so a test
 can pick an outcome. `test/HouseDraw.t.sol` and `test/SwarmDerbyDraw.t.sol` check the real
 signature path with the test house key. Forge 1.5.1 with Solidity 0.8.26 passes
-**114 tests, 0 failed** (40 auction, 54 SwarmDerby, 6 HouseDraw and 14 house draw tests).
+**117 tests, 0 failed** (40 auction, 55 SwarmDerby, 6 HouseDraw and 16 house draw tests).
 Each fuzz test runs 256 cases.
 
 WP3 Done-when evidence (function names in `test/DerbyAuction.t.sol`):

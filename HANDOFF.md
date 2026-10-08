@@ -8,8 +8,9 @@ before moving on. Long request bodies live in `DEPLOY.md`.
 **Decisions that belong to the owner, not the agent:**
 
 1. Which wallet owns the contract (`owner` in the launch). Only it can change prices (never
-   below 0.01 IMD a turn), withdraw the 5% ops share and transfer ownership. It can never
-   touch pots or vaults.
+   below 0.01 IMD a turn), withdraw the 5% ops share, change the house key with 2 days'
+   notice and transfer ownership. It can't move pots or vaults, but the holder of the house
+   key can compute every draw, so the key holder must not play.
 2. That paid entry + prize pool is allowed where the game will be offered.
 
 **Two different IMD tokens:**
@@ -33,7 +34,7 @@ Create two **public** GitHub repos from the two folders:
 - `swarm-derby-contracts` (Foundry repo at the root)
 - `swarm-derby-site` (static site at the root)
 
-Check: `forge test` passes (114), and `python3 build.py game.html ../index.html`, run in the
+Check: `forge test` passes (117), and `python3 build.py game.html ../index.html`, run in the
 site repo's `dev/` folder, reproduces `index.html` exactly.
 
 ## 2. Readiness check (free)

@@ -170,6 +170,51 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
         derby.swing(1, 100, 100, c);
     }
 
+    /// Someone who copies a player's commit only burns a turn of their own; the owner keeps it.
+    function test_copiedCommitDoesNotBlockItsOwner() public {
+        address other = address(0x0BE);
+        imd.mint(other, 10 ether);
+        vm.startPrank(other);
+        imd.approve(address(derby), type(uint256).max);
+        derby.buyTurns(1, 1);
+        bytes32 c = derby.commitFor(SALT, player);
+        uint256 copy = derby.swing(1, 100, 100, c);
+        vm.stopPrank();
+        uint256 id = _commit(1, SALT);
+        derby.draw(id, _sign(id));
+        derby.finalize(id, SALT);
+        derby.draw(copy, _sign(copy));
+        vm.expectRevert(SwarmDerby.BadSalt.selector);
+        derby.finalize(copy, SALT);
+    }
+
+    function test_houseKeyProposalCanBeCancelledAndLapses() public {
+        bytes memory other = bytes.concat(_houseKey());
+        other[255] = bytes1(uint8(other[255]) ^ 0x02);
+        vm.expectRevert(SwarmDerby.KeyNotReady.selector);
+        derby.cancelHouseKey();
+        derby.proposeHouseKey(other);
+        vm.prank(player);
+        vm.expectRevert(SwarmDerby.NotOwner.selector);
+        derby.cancelHouseKey();
+        vm.expectEmit(false, false, false, true, address(derby));
+        emit SwarmDerby.HouseKeyProposed(bytes32(0), 0);
+        derby.cancelHouseKey();
+        assertEq(derby.pendingHouseKeyAt(), 0);
+        assertEq(derby.pendingHouseKey().length, 0);
+        vm.warp(T0 + 2 days);
+        vm.expectRevert(SwarmDerby.KeyNotReady.selector);
+        derby.activateHouseKey();
+
+        derby.proposeHouseKey(other); // ready at T0 + 4 days, lapses after T0 + 5 days
+        vm.warp(T0 + 5 days + 1);
+        vm.expectRevert(SwarmDerby.KeyExpired.selector);
+        derby.activateHouseKey();
+        vm.warp(T0 + 5 days);
+        derby.activateHouseKey();
+        assertEq(keccak256(derby.houseKey()), keccak256(other));
+    }
+
     function test_houseKeyChangeWaitsForTheDelay() public {
         bytes memory key = _houseKey();
         bytes memory other = bytes.concat(key);
@@ -230,6 +275,14 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
         assertEq(derby.pendingHouseKeyAt(), 0);
         vm.expectRevert(SwarmDerby.BadDraw.selector);
         derby.draw(id, sig);
+        // No new swing while no key is set: no turn moves. A miss needs no draw.
+        bytes32 c = derby.commitFor(keccak256("later"), player);
+        vm.startPrank(player);
+        vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+        derby.swing(1, 100, 100, c);
+        derby.swing(1, 0, 0, bytes32(0));
+        vm.stopPrank();
+        assertEq(derby.turns(1, player), 4);
         vm.warp(T0 + derby.DRAW_WINDOW() + 1);
         derby.expire(id);
         assertEq(derby.turns(0, player), 5);

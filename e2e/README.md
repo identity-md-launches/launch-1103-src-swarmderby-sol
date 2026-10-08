@@ -11,7 +11,7 @@ anvil --silent &
 node house/keygen.mjs /tmp/house-key.pem               # prints the house modulus
 HOUSE_MODULUS=<modulus> python3 e2e/setup.py           # deploys MockIMD + SwarmDerby v2, writes e2e/addrs.json
 (cd house && npm ci && DERBY=<derby> HOUSE_KEY_FILE=/tmp/house-key.pem GAS_KEY_FILE=<file with anvil key #2> \
-  RPC_URL=http://127.0.0.1:8545 CHAIN_ID=31337 MAX_GWEI=10 node house.mjs &)
+  RPC_URL=http://127.0.0.1:8545 CHECK_RPC_URLS= QUORUM=1 CHAIN_ID=31337 MAX_GWEI=10 node house.mjs &)
 RPC_URL=http://127.0.0.1:8545 PRIVATE_KEY=<anvil key #1> DERBY=<derby> IMD=<imd> CHAIN_ID=31337 MAX_GWEI=10 \
   MAX_IMD=1 MAX_SWINGS=3 node ../swarm-derby-site/agent-bot.mjs
 export HOUSE_PID=<pid of node house.mjs>              # recover.py and refund.py pause the house
