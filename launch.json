@@ -1,0 +1,23 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "SwarmDerby",
+      "constructorArgs": [
+        "$owner",
+        "0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127",
+        "150000000000000000",
+        "500000000000000000",
+        "0x9b7398ccc4834a29c3064efa2b3530e31022109a8dc6a654bfa878ae0059a2a2",
+        "0xc3ac9f31916c0a320a2c179109e395905fc821aab91a1136523c1b90bce1536f",
+        "0xe5c11ab65de79551875327766c99e74f9243761f0b3c8d323194bd7f3da77086",
+        "0xe27991d5ac2e46ec41b36dc3e959b99dfd40e309277beda06980f5d5d59dd86f",
+        "0x2d3d01738e7773bfada03634ac9d8611b31f274422bf36137afdf465a406d299",
+        "0x433bf548042816d7aa6b6f69e007bc70d5acb0db4a5c8f19cecbaf31728faa39",
+        "0x9b0b143d34eb956a2230fe75fdaed887cbd68f7154d1abfb62204e928b9c4e9b",
+        "0x54ab9cc7bf171f27a16aa37d8a4a7a02f54b7ab2056befbbffcfbdb24506863d"
+      ]
+    }
+  ],
+  "notes": "Deploy SwarmDerby v2 from src/SwarmDerby.sol to Robinhood Chain. The explicit owner is $owner. Constructor arguments are owner_, imd_, singlePrice_, packPrice_, then houseKey0_ through houseKey7_. The eight bytes32 words concatenate in order to the exact approved 256-byte RSA modulus. The constructor sets the existing IMD token address, initial prices and house key without external calls. This manifest deploys only SwarmDerby, with zero ETH and no initialization calls. The house service runs separately and must use the matching signing key; the house key holder must not play."
+}
