@@ -16,8 +16,11 @@ def deploy(bytecode):
 imd=deploy(art('Mocks.sol','MockIMD')['bytecode']['object'])
 # The house key: HOUSE_MODULUS (from house/keygen.mjs), or the fixed test key that the tests use.
 house=__import__('os').environ.get('HOUSE_MODULUS') or subprocess.check_output(['node','test/fixtures/house-test-key.mjs','modulus']).decode().strip()
-enc=subprocess.check_output(['cast','abi-encode','c(address,address,uint256,uint256,bytes)',
-    acct, imd, str(15*10**16), str(5*10**17), house]).decode().strip()
+modulus=bytes.fromhex(house.removeprefix('0x'))
+if len(modulus) != 256: raise ValueError('HOUSE_MODULUS must be exactly 256 bytes')
+words=['0x'+modulus[i:i+32].hex() for i in range(0, 256, 32)]
+enc=subprocess.check_output(['cast','abi-encode','c(address,address,uint256,uint256,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32)',
+    acct, imd, str(15*10**16), str(5*10**17), *words]).decode().strip()
 derby=deploy(art('SwarmDerby.sol','SwarmDerby')['bytecode']['object']+enc[2:])
 # mint 10 IMD to player
 data=subprocess.check_output(['cast','calldata','mint(address,uint256)',acct,str(10*10**18)]).decode().strip()

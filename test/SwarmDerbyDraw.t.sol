@@ -17,7 +17,7 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
     function setUp() public {
         vm.warp(T0);
         imd = new MockIMD();
-        derby = new SwarmDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, _houseKey());
+        derby = _deployDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, _houseKey());
         imd.mint(player, 100 ether);
         vm.startPrank(player);
         imd.approve(address(derby), type(uint256).max);
@@ -58,7 +58,7 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
     }
 
     function test_drawFromAnotherDeploymentRejected() public {
-        SwarmDerby other = new SwarmDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, _houseKey());
+        SwarmDerby other = _deployDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, _houseKey());
         vm.startPrank(player);
         imd.approve(address(other), type(uint256).max);
         other.buyTurns(0, 1);
@@ -115,7 +115,7 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
         derby.expire(id);
         assertEq(derby.turns(0, player), 5);
         assertEq(derby.arcadeSwingsLeft(player), 20);
-        (, , , , SwarmDerby.Status st, , , , ) = derby.swings(id);
+        (,,,, SwarmDerby.Status st,,,,) = derby.swings(id);
         assertEq(uint8(st), uint8(SwarmDerby.Status.Refunded));
         vm.expectRevert(SwarmDerby.WrongStatus.selector);
         derby.expire(id);
@@ -243,6 +243,10 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
         derby.draw(id2, sig2);
         vm.expectRevert(SwarmDerby.KeyNotReady.selector);
         derby.activateHouseKey();
+        vm.warp(T0 + 2 days + derby.DRAW_WINDOW() + 1);
+        derby.expire(id2);
+        assertEq(derby.turns(0, player), 4); // the old-key swing refunds; the earlier draw spent one
+        assertEq(derby.arcadeSwingsLeft(player), 19); // both commits were on the same UTC day
     }
 
     function test_badKeysRejected() public {
@@ -260,7 +264,9 @@ contract SwarmDerbyDrawTest is HouseKeyTest {
         vm.expectRevert(SwarmDerby.BadKey.selector);
         derby.proposeHouseKey(low);
         vm.expectRevert(SwarmDerby.BadKey.selector);
-        new SwarmDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, short);
+        _deployDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, even);
+        vm.expectRevert(SwarmDerby.BadKey.selector);
+        _deployDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.5 ether, low);
     }
 
     function test_revokeStopsDrawsAtOnceAndSwingsRefund() public {

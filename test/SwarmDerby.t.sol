@@ -11,10 +11,24 @@ contract MockIMD {
     mapping(address => mapping(address => uint256)) public allowance;
     mapping(address => bool) public blocked;
     mapping(address => bool) public odd; // transfers to these answer the word 2, not a bool
-    function block_(address a) external { blocked[a] = true; }
-    function odd_(address a) external { odd[a] = true; }
-    function mint(address to, uint256 a) external { balanceOf[to] += a; }
-    function approve(address s, uint256 a) external returns (bool) { allowance[msg.sender][s] = a; return true; }
+
+    function block_(address a) external {
+        blocked[a] = true;
+    }
+
+    function odd_(address a) external {
+        odd[a] = true;
+    }
+
+    function mint(address to, uint256 a) external {
+        balanceOf[to] += a;
+    }
+
+    function approve(address s, uint256 a) external returns (bool) {
+        allowance[msg.sender][s] = a;
+        return true;
+    }
+
     function transfer(address to, uint256 a) external returns (bool) {
         require(!blocked[to], "blocked");
         if (odd[to]) {
@@ -27,15 +41,25 @@ contract MockIMD {
         balanceOf[to] += a;
         return true;
     }
+
     function transferFrom(address f, address to, uint256 a) external returns (bool) {
-        allowance[f][msg.sender] -= a; balanceOf[f] -= a; balanceOf[to] += a; return true;
+        allowance[f][msg.sender] -= a;
+        balanceOf[f] -= a;
+        balanceOf[to] += a;
+        return true;
     }
 }
 
 contract DerbyHarness is FakeDrawDerby {
     constructor(address owner_, address imd_) FakeDrawDerby(owner_, IERC20(imd_), 0.15 ether, 0.5 ether) {}
-    function recordDinger(uint8 league, uint256 day, address p, uint256 f) external { _recordDinger(league, day, p, f); }
-    function recordToday(uint8 league, address p, uint256 f) external { _recordDinger(league, currentDay(), p, f); }
+
+    function recordDinger(uint8 league, uint256 day, address p, uint256 f) external {
+        _recordDinger(league, day, p, f);
+    }
+
+    function recordToday(uint8 league, address p, uint256 f) external {
+        _recordDinger(league, currentDay(), p, f);
+    }
 }
 
 contract SwarmDerbyTest is HouseKeyTest {
@@ -85,7 +109,7 @@ contract SwarmDerbyTest is HouseKeyTest {
     }
 
     function _deadline(uint256 id) internal view returns (uint256) {
-        (, , , , , uint64 at, , , ) = derby.swings(id);
+        (,,,,, uint64 at,,,) = derby.swings(id);
         return uint256(at) + derby.DRAW_WINDOW() + derby.REVEAL_WINDOW();
     }
 
@@ -95,7 +119,7 @@ contract SwarmDerbyTest is HouseKeyTest {
 
     /// Pick the draw that makes `swingId` land at least `minTier` with this salt/quality.
     function _rig(uint256 swingId, uint8 q, uint8 minTier, string memory tag) internal returns (uint16 feet) {
-        for (uint256 i; ; ++i) {
+        for (uint256 i;; ++i) {
             bytes memory sig = _fakeSig(keccak256(abi.encode(tag, i)));
             (uint8 t, uint16 f) = DerbyOdds.roll(derby.swingSeed(SALT, keccak256(sig)), swingId, q, 100);
             if (t >= minTier) {
@@ -122,7 +146,7 @@ contract SwarmDerbyTest is HouseKeyTest {
     }
 
     function _day(uint256 id) internal view returns (uint32 d) {
-        (, , , , , , , d, ) = derby.swings(id);
+        (,,,,,,, d,) = derby.swings(id);
     }
 
     // ───────── turns + leagues ─────────
@@ -153,6 +177,85 @@ contract SwarmDerbyTest is HouseKeyTest {
         assertEq(derby.pot(0), 0.0675 ether);
     }
 
+    function test_revokedKeyRejectsPurchasesWithoutMovingFunds() public {
+        derby.revokeHouseKey();
+        for (uint8 league; league < 2; ++league) {
+            vm.startPrank(player);
+            vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+            derby.buyTurns(league, 1);
+            vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+            derby.buyPacks(league, 1);
+            vm.stopPrank();
+            assertEq(derby.turns(league, player), 0);
+            assertEq(derby.pot(league), 0);
+            assertEq(derby.vault(league), 0);
+            assertEq(derby.dayPot(league, DAY0), 0);
+            assertEq(derby.openDays(league).length, 0);
+        }
+        assertEq(imd.balanceOf(player), 100 ether);
+        assertEq(imd.allowance(player, address(derby)), type(uint256).max);
+        assertEq(imd.balanceOf(address(derby)), 0);
+        assertEq(imd.balanceOf(derby.DEAD()), 0);
+        assertEq(derby.opsBalance(), 0);
+    }
+
+    function test_sessionCannotBuyWhileKeyRevoked() public {
+        _bindSession(player, sessionPk);
+        imd.mint(session, 1 ether);
+        vm.prank(session);
+        imd.approve(address(derby), 1 ether);
+        derby.revokeHouseKey();
+        vm.startPrank(session);
+        vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+        derby.buyTurns(0, 1);
+        vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+        derby.buyPacks(1, 1);
+        vm.stopPrank();
+        assertEq(imd.balanceOf(session), 1 ether);
+        assertEq(imd.allowance(session, address(derby)), 1 ether);
+        assertEq(imd.balanceOf(address(derby)), 0);
+        assertEq(imd.balanceOf(derby.DEAD()), 0);
+        for (uint8 league; league < 2; ++league) {
+            assertEq(derby.turns(league, player), 0);
+            assertEq(derby.turns(league, session), 0);
+        }
+    }
+
+    function test_purchasesResumeOnlyAfterKeyActivation() public {
+        derby.revokeHouseKey();
+        derby.proposeHouseKey(dummyHouseKey());
+        vm.warp(T0 + 2 days - 1);
+        vm.prank(player);
+        vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+        derby.buyTurns(0, 1);
+        vm.warp(T0 + 2 days);
+        vm.prank(player);
+        vm.expectRevert(SwarmDerby.NoHouseKey.selector);
+        derby.buyPacks(1, 1);
+        derby.activateHouseKey();
+        vm.startPrank(player);
+        derby.buyTurns(0, 1);
+        derby.buyPacks(1, 1);
+        vm.stopPrank();
+        assertEq(derby.turns(0, player), 1);
+        assertEq(derby.turns(1, player), 5);
+        assertEq(imd.balanceOf(player), 99.35 ether);
+        assertEq(imd.balanceOf(derby.DEAD()), 0.26 ether);
+        assertEq(derby.pot(0), 0.0675 ether);
+        assertEq(derby.pot(1), 0.225 ether);
+        assertEq(derby.vault(0), 0.015 ether);
+        assertEq(derby.vault(1), 0.05 ether);
+        assertEq(derby.opsBalance(), 0.0325 ether);
+    }
+
+    function test_pendingKeyDoesNotBlockPurchases() public {
+        derby.proposeHouseKey(dummyHouseKey());
+        vm.prank(player);
+        derby.buyTurns(0, 1);
+        assertEq(derby.turns(0, player), 1);
+        assertEq(imd.balanceOf(player), 99.85 ether);
+    }
+
     function test_badLeagueRejected() public {
         vm.prank(player);
         vm.expectRevert(SwarmDerby.BadLeague.selector);
@@ -169,7 +272,7 @@ contract SwarmDerbyTest is HouseKeyTest {
     }
 
     function test_ownerIsConstructorArg() public {
-        SwarmDerby d = new SwarmDerby(address(0xA11), IERC20(address(imd)), 0.15 ether, 0.5 ether, dummyHouseKey());
+        SwarmDerby d = _deployDerby(address(0xA11), IERC20(address(imd)), 0.15 ether, 0.5 ether, dummyHouseKey());
         assertEq(d.owner(), address(0xA11));
         vm.expectRevert(SwarmDerby.NotOwner.selector);
         d.setPrices(0.2 ether, 0.6 ether);
@@ -177,13 +280,13 @@ contract SwarmDerbyTest is HouseKeyTest {
 
     function test_constructorRejectsZeroAddressesAndFreeTurns() public {
         vm.expectRevert(SwarmDerby.ZeroAddress.selector);
-        new SwarmDerby(address(0), IERC20(address(imd)), 0.15 ether, 0.5 ether, dummyHouseKey());
+        _deployDerby(address(0), IERC20(address(imd)), 0.15 ether, 0.5 ether, dummyHouseKey());
         vm.expectRevert(SwarmDerby.ZeroAddress.selector);
-        new SwarmDerby(address(this), IERC20(address(0)), 0.15 ether, 0.5 ether, dummyHouseKey());
+        _deployDerby(address(this), IERC20(address(0)), 0.15 ether, 0.5 ether, dummyHouseKey());
         vm.expectRevert(SwarmDerby.BadPrice.selector);
-        new SwarmDerby(address(this), IERC20(address(imd)), 0, 0.5 ether, dummyHouseKey());
+        _deployDerby(address(this), IERC20(address(imd)), 0, 0.5 ether, dummyHouseKey());
         vm.expectRevert(SwarmDerby.BadPrice.selector);
-        new SwarmDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.04 ether, dummyHouseKey());
+        _deployDerby(address(this), IERC20(address(imd)), 0.15 ether, 0.04 ether, dummyHouseKey());
     }
 
     // ───────── admin ─────────
@@ -238,7 +341,9 @@ contract SwarmDerbyTest is HouseKeyTest {
     function test_arcadeCapIsTwentyPerDay() public {
         vm.prank(player);
         derby.buyPacks(0, 5); // 25 turns
-        for (uint256 i; i < 20; ++i) _swing(0, 50, bytes32(0)); // misses still count
+        for (uint256 i; i < 20; ++i) {
+            _swing(0, 50, bytes32(0)); // misses still count
+        }
         assertEq(derby.arcadeSwingsLeft(player), 0);
         vm.prank(player);
         vm.expectRevert(SwarmDerby.DailyCapReached.selector);
@@ -252,7 +357,9 @@ contract SwarmDerbyTest is HouseKeyTest {
     function test_agentLeagueHasNoCap() public {
         vm.prank(player);
         derby.buyPacks(1, 5);
-        for (uint256 i; i < 25; ++i) _swingIn(1, 0, 50, bytes32(0));
+        for (uint256 i; i < 25; ++i) {
+            _swingIn(1, 0, 50, bytes32(0));
+        }
         assertEq(derby.turns(1, player), 0);
     }
 
@@ -260,7 +367,10 @@ contract SwarmDerbyTest is HouseKeyTest {
         _bindSession(player, sessionPk);
         vm.prank(player);
         derby.buyPacks(0, 5);
-        for (uint256 i; i < 20; ++i) { vm.prank(session); derby.swing(0, 0, 50, bytes32(0)); }
+        for (uint256 i; i < 20; ++i) {
+            vm.prank(session);
+            derby.swing(0, 0, 50, bytes32(0));
+        }
         vm.prank(session);
         vm.expectRevert(SwarmDerby.DailyCapReached.selector);
         derby.swing(0, 0, 50, bytes32(0));
@@ -280,7 +390,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         (address[] memory ps, uint256[] memory sc) = derby.board(0, DAY0);
         assertEq(ps[0], player);
         assertEq(sc[0], want);
-        (ps, ) = derby.board(0, DAY0 + 1);
+        (ps,) = derby.board(0, DAY0 + 1);
         assertEq(ps.length, 0);
         assertEq(derby.arcadeSwingsLeft(player), 20); // the new day's cap is untouched
     }
@@ -292,7 +402,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         derby.buyTurns(0, 1);
         uint256 id = _swing(0, 50, bytes32(0));
         assertEq(derby.turns(0, player), 0);
-        (, , , , SwarmDerby.Status st, , , , ) = derby.swings(id);
+        (,,,, SwarmDerby.Status st,,,,) = derby.swings(id);
         assertEq(uint8(st), uint8(SwarmDerby.Status.Final));
     }
 
@@ -359,7 +469,13 @@ contract SwarmDerbyTest is HouseKeyTest {
     /// A token address with no code (e.g. the Ethereum IMD on Robinhood) deploys, but no
     /// purchase is ever credited, so there are no free turns and no unbacked pots.
     function test_tokenWithoutCodeRefusesPurchases() public {
-        SwarmDerby d = new SwarmDerby(address(this), IERC20(address(0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7)), 0.15 ether, 0.5 ether, dummyHouseKey());
+        SwarmDerby d = _deployDerby(
+            address(this),
+            IERC20(address(0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7)),
+            0.15 ether,
+            0.5 ether,
+            dummyHouseKey()
+        );
         vm.startPrank(player);
         vm.expectRevert(SwarmDerby.NotAContract.selector);
         d.buyTurns(0, 1);
@@ -387,7 +503,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         _rig(0, 100, DerbyOdds.HOMER, "edge");
         uint256 id = _swing(100, 100, SALT);
         vm.warp(_deadline(id));
-        (uint8 tier, ) = derby.finalize(id, SALT);
+        (uint8 tier,) = derby.finalize(id, SALT);
         assertGe(tier, DerbyOdds.HOMER);
     }
 
@@ -421,7 +537,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         _rig(0, 1, DerbyOdds.SLAM, "slam");
         uint256 id = _swing(1, 100, SALT);
         uint256 before = imd.balanceOf(player);
-        (uint8 tier, ) = derby.finalize(id, SALT);
+        (uint8 tier,) = derby.finalize(id, SALT);
         assertEq(tier, DerbyOdds.SLAM);
         assertEq(imd.balanceOf(player) - before, 0.15 ether);
         assertEq(derby.vault(0), 1.35 ether);
@@ -434,7 +550,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         uint16 feet = _rig(0, 1, DerbyOdds.SLAM, "slam");
         uint256 id = _swing(1, 100, SALT);
         imd.block_(player);
-        (uint8 tier, ) = derby.finalize(id, SALT);
+        (uint8 tier,) = derby.finalize(id, SALT);
         assertEq(tier, DerbyOdds.SLAM);
         assertEq(derby.vault(0), 1.5 ether);
         assertEq(derby.dayScore(0, DAY0, player), feet);
@@ -447,7 +563,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         _rig(0, 1, DerbyOdds.SLAM, "slam");
         uint256 id = _swing(1, 100, SALT);
         imd.odd_(player);
-        (uint8 tier, ) = derby.finalize(id, SALT);
+        (uint8 tier,) = derby.finalize(id, SALT);
         assertEq(tier, DerbyOdds.SLAM);
         assertEq(derby.vault(0), 1.5 ether);
     }
@@ -456,7 +572,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         vm.prank(player);
         derby.buyTurns(0, 1);
         uint256 id = _swing(80, 42, SALT);
-        (, , , uint8 v, , , , , ) = derby.swings(id);
+        (,,, uint8 v,,,,,) = derby.swings(id);
         assertEq(v, 42);
     }
 
@@ -470,7 +586,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         vm.prank(session);
         uint256 id = derby.swing(0, 60, 70, c);
         assertEq(derby.turns(0, player), 1);
-        (address who, , , , , , , , ) = derby.swings(id);
+        (address who,,,,,,,,) = derby.swings(id);
         assertEq(who, player);
         _draw(id);
         vm.prank(session);
@@ -574,7 +690,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         (address[] memory ps, uint256[] memory sc) = derby.board(0, DAY0);
         assertEq(ps[0], player);
         assertEq(sc[0], want);
-        (address[] memory agents, ) = derby.board(1, DAY0);
+        (address[] memory agents,) = derby.board(1, DAY0);
         assertEq(agents.length, 0);
     }
 
@@ -591,13 +707,20 @@ contract SwarmDerbyTest is HouseKeyTest {
     function _checkBoard(uint8 league, address[] memory pool) internal view {
         (address[] memory ps, uint256[] memory fs) = derby.board(league, DAY0);
         assertLe(ps.length, 10);
-        for (uint256 i = 1; i < ps.length; ++i) assertGe(fs[i - 1], fs[i], "sorted");
+        for (uint256 i = 1; i < ps.length; ++i) {
+            assertGe(fs[i - 1], fs[i], "sorted");
+        }
         uint256 floor = ps.length == 10 ? fs[9] : 0;
         uint256 onBoard;
         for (uint256 j; j < pool.length; ++j) {
             uint256 f = derby.dayScore(league, DAY0, pool[j]);
             bool listed;
-            for (uint256 i; i < ps.length; ++i) if (ps[i] == pool[j]) { listed = true; assertEq(fs[i], f); }
+            for (uint256 i; i < ps.length; ++i) {
+                if (ps[i] == pool[j]) {
+                    listed = true;
+                    assertEq(fs[i], f);
+                }
+            }
             if (listed) ++onBoard;
             else if (ps.length == 10) assertLe(f, floor, "missing a leader");
             else assertEq(f, 0, "scorer missing from short board");
@@ -607,7 +730,9 @@ contract SwarmDerbyTest is HouseKeyTest {
 
     function testFuzz_boardsAreTopTen(uint256 seed) public {
         address[] memory pool = new address[](16);
-        for (uint256 j; j < 16; ++j) pool[j] = address(uint160(0x1000 + j));
+        for (uint256 j; j < 16; ++j) {
+            pool[j] = address(uint160(0x1000 + j));
+        }
         for (uint256 k; k < 60; ++k) {
             seed = uint256(keccak256(abi.encode(seed, k)));
             uint8 league = uint8(seed % 2);
@@ -621,8 +746,8 @@ contract SwarmDerbyTest is HouseKeyTest {
         derby.recordToday(0, address(0x1), 400);
         vm.warp(block.timestamp + 1 days);
         derby.recordToday(0, address(0x2), 380);
-        (address[] memory today, ) = derby.board(0, DAY0 + 1);
-        (address[] memory yesterday, ) = derby.board(0, DAY0);
+        (address[] memory today,) = derby.board(0, DAY0 + 1);
+        (address[] memory yesterday,) = derby.board(0, DAY0);
         assertEq(today.length, 1);
         assertEq(today[0], address(0x2));
         assertEq(yesterday[0], address(0x1));
@@ -714,9 +839,9 @@ contract SwarmDerbyTest is HouseKeyTest {
         derby.settleNextDay(0);
         vm.warp(_deadline(id) + 1);
         derby.settleNextDay(0);
-        (uint8 tier, ) = derby.finalize(id, SALT); // too late to score
+        (uint8 tier,) = derby.finalize(id, SALT); // too late to score
         assertEq(tier, DerbyOdds.FOUL);
-        (address[] memory ps, ) = derby.board(0, DAY0);
+        (address[] memory ps,) = derby.board(0, DAY0);
         assertEq(ps.length, 0);
     }
 
@@ -743,7 +868,7 @@ contract SwarmDerbyTest is HouseKeyTest {
     function test_emptyDayRollsOverWithoutTip() public {
         _buy(player, 0, 10);
         _closeDay();
-        (, , , , uint256 tip) = derby.nextSettlement(0);
+        (,,,, uint256 tip) = derby.nextSettlement(0);
         assertEq(tip, 0);
         address settler = address(0x5E77);
         vm.prank(settler);
@@ -754,7 +879,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         _buy(player, 0, 10);
         _podium(0, DAY0 + 1);
         _closeDay();
-        (, , , uint256 amount, ) = derby.nextSettlement(0);
+        (,,, uint256 amount,) = derby.nextSettlement(0);
         assertEq(amount, 1.35 ether);
     }
 
@@ -774,7 +899,7 @@ contract SwarmDerbyTest is HouseKeyTest {
     }
 
     function test_nextSettlementBeforeAnything() public view {
-        (bool exists, , , , ) = derby.nextSettlement(0);
+        (bool exists,,,,) = derby.nextSettlement(0);
         assertFalse(exists);
     }
 
@@ -786,16 +911,19 @@ contract SwarmDerbyTest is HouseKeyTest {
                 seed = uint256(keccak256(abi.encode(seed, d, k)));
                 uint8 league = uint8(seed % 2);
                 address who = address(uint160(0x2000 + (seed >> 8) % 5));
-                if ((seed >> 16) % 3 != 0) { _buy(who, league, 1 + (seed >> 24) % 9); bought += (1 + (seed >> 24) % 9) * 0.15 ether; }
+                if ((seed >> 16) % 3 != 0) {
+                    _buy(who, league, 1 + (seed >> 24) % 9);
+                    bought += (1 + (seed >> 24) % 9) * 0.15 ether;
+                }
                 if ((seed >> 32) % 2 == 0) derby.recordToday(league, who, 375 + (seed >> 40) % 246);
             }
             _closeDay();
             for (uint8 l; l < 2; ++l) {
-                (bool exists, bool ready, , , ) = derby.nextSettlement(l);
+                (bool exists, bool ready,,,) = derby.nextSettlement(l);
                 while (exists) {
                     assertTrue(ready);
                     derby.settleNextDay(l);
-                    (exists, ready, , , ) = derby.nextSettlement(l);
+                    (exists, ready,,,) = derby.nextSettlement(l);
                 }
                 assertEq(derby.pot(l), derby.rollover(l));
             }
@@ -848,7 +976,7 @@ contract SwarmDerbyTest is HouseKeyTest {
         uint256 capped;
         for (uint256 i; i < 3000; ++i) {
             bytes32 seed = keccak256(abi.encode("power", i));
-            (uint8 hi, ) = DerbyOdds.roll(seed, i, 1, 100);
+            (uint8 hi,) = DerbyOdds.roll(seed, i, 1, 100);
             (uint8 lo, uint16 feet) = DerbyOdds.roll(seed, i, 1, 59);
             assertLe(lo, DerbyOdds.HOMER);
             if (hi > DerbyOdds.HOMER) {
@@ -870,7 +998,9 @@ contract SwarmDerbyTest is HouseKeyTest {
         uint256[5] memory prev = DerbyOdds.thresholds(1);
         for (uint8 q = 2; q <= 100; ++q) {
             uint256[5] memory c = DerbyOdds.thresholds(q);
-            for (uint256 k; k < 5; ++k) assertLe(c[k], prev[k], "a better swing lost odds");
+            for (uint256 k; k < 5; ++k) {
+                assertLe(c[k], prev[k], "a better swing lost odds");
+            }
             prev = c;
         }
         uint256[5] memory top = DerbyOdds.thresholds(100);

@@ -104,7 +104,7 @@ Dry-run with `POST /requests/check` before paying, and confirm chain 4663 lists
 
 ```json
 {
-  "objective": "Deploy SwarmDerby (src/SwarmDerby.sol) unchanged to Robinhood Chain. Deploy only SwarmDerby. Do not create or launch any token, distributor or pool. Constructor arguments in order: owner_ = $owner; imd_ = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127; singlePrice_ = 150000000000000000; packPrice_ = 500000000000000000; houseKey_ = HOUSE_MODULUS_HEX.",
+  "objective": "Deploy only SwarmDerby (src/SwarmDerby.sol) to Robinhood Chain. Do not deploy DerbyAuction or create a token, distributor or pool. Constructor arguments in order: owner_ = $owner; imd_ = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127; singlePrice_ = 150000000000000000; packPrice_ = 500000000000000000; houseKey0_ through houseKey7_ = the eight bytes32 words listed in ADAPTATION.md, most significant first.",
   "repoUrl": "https://github.com/YOU/swarm-derby-contracts",
   "baseCommit": "COMMIT_FROM_IMPORT",
   "contracts": ["src/SwarmDerby.sol"],
@@ -115,8 +115,12 @@ Dry-run with `POST /requests/check` before paying, and confirm chain 4663 lists
 }
 ```
 
-`HOUSE_MODULUS_HEX` is the 256-byte modulus (`0x` and 512 hex digits) that the house service's
-key generator prints (`house/keygen.mjs`). Start the house service (`house/README.md`) before
+The house modulus is 256 bytes (`0x` and 512 hex digits), as printed by the house service's
+key generator (`house/keygen.mjs`). The static-only launch factory takes it as eight separate
+`bytes32` arguments, consecutive 32-byte chunks in big-endian order; the constructor joins
+them before validation. `ADAPTATION.md` lists the exact twelve arguments for this launch.
+The runtime `houseKey()` getter and `proposeHouseKey(bytes)` ABI are unchanged.
+Start the house service (`house/README.md`) before
 the site points at the contract: without it, every swing waits 5 minutes and comes back as a
 refund.
 
@@ -169,8 +173,14 @@ the queue; nothing expires.
   `activateHouseKey` after `KEY_DELAY` (2 days) and within `KEY_WINDOW` (1 day) after that;
   the owner can `cancelHouseKey` before. Watch `HouseKeyProposed`: a key the owner holds
   would let the owner's accomplice steer rolls. `revokeHouseKey` stops all draws at once (for
-  a leaked key); open swings are then refunded and new swings revert `NoHouseKey` until a
-  new key is active.
+  a leaked key); undrawn open swings are refundable after `DRAW_WINDOW`, and new contact
+  swings and turn/pack purchases revert `NoHouseKey` until a new key is active. A proposal
+  alone does not restore purchases. Existing drawn swings can still be finalized.
+  Activation immediately invalidates old-key signatures for undrawn swings, which then
+  expire for a turn refund. Rotate at a quiet time, allow pending draws to finish, and
+  switch/restart the house service with the matching key when `HouseKeySet` is emitted.
+  Once a proposal is ready anyone can activate it, so coordinate the service switch for
+  that earliest time. The service's periodic key check only alerts; it does not reload keys.
 - A purchase pays the price in force when it lands, so a price change also applies to a buy
   already sent from the page. Change prices only when nobody is buying.
 - The Robinhood IMD token's owner can block addresses or stop transfers. Blocking the derby

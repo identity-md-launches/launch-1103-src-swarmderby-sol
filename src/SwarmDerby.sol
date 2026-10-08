@@ -74,7 +74,13 @@ contract SwarmDerby {
     bytes32 internal constant SESSION_TYPEHASH = keccak256("Session(address player,address session,uint256 nonce)");
 
     // ───────── types ─────────
-    enum Status { None, Committed, Drawn, Final, Refunded }
+    enum Status {
+        None,
+        Committed,
+        Drawn,
+        Final,
+        Refunded
+    }
 
     struct Swing {
         address player;
@@ -93,7 +99,7 @@ contract SwarmDerby {
     address public owner;
     address public pendingOwner; // named by transferOwnership, takes over on acceptOwnership
     uint256 public singlePrice; // per turn
-    uint256 public packPrice;   // per PACK_SIZE turns
+    uint256 public packPrice; // per PACK_SIZE turns
 
     /// @notice Everything a league holds for prizes: every unsettled day's pot plus rollover.
     uint256[2] public pot;
@@ -102,7 +108,7 @@ contract SwarmDerby {
     /// @notice The house RSA public key: a 2048-bit modulus (e = 65537). See HouseDraw.
     ///         Empty after revokeHouseKey: then no swing can be drawn and every swing is refunded.
     bytes public houseKey;
-    bytes public pendingHouseKey;    // proposed by the owner
+    bytes public pendingHouseKey; // proposed by the owner
     uint256 public pendingHouseKeyAt; // when pendingHouseKey can be activated; 0 if none
     /// @notice Commits already used. A reused salt would show the house a pending result.
     mapping(address => mapping(bytes32 => bool)) public commitUsed; // player => commit => used
@@ -114,8 +120,8 @@ contract SwarmDerby {
     ///         slam payout and leaderboard credit goes to the player. Binding needs the
     ///         key's own signature, and the key can leave at any time.
     mapping(address => address) public sessionPlayer; // session key -> player
-    mapping(address => address) public sessionOf;     // player -> session key
-    mapping(address => uint256) public sessionNonce;  // session key -> binds so far
+    mapping(address => address) public sessionOf; // player -> session key
+    mapping(address => uint256) public sessionNonce; // session key -> binds so far
 
     /// @notice Scoreboards. Arcade: each player's longest homer of the day. Agent: total
     ///         homer feet of the day. `board` keeps the day's top BOARD_SIZE, highest first,
@@ -128,16 +134,18 @@ contract SwarmDerby {
 
     /// @notice Daily settlement. Each UTC day with a purchase or a swing joins its league's
     ///         queue of days; settleNextDay pays them in order.
-    mapping(uint8 => mapping(uint256 => uint256)) public dayPot;     // league => day => pot share of that day's purchases
+    mapping(uint8 => mapping(uint256 => uint256)) public dayPot; // league => day => pot share of that day's purchases
     mapping(uint8 => mapping(uint256 => uint64)) public dayLastCommit; // league => day => timestamp of its last swing
-    mapping(uint8 => uint256[]) internal _days;                      // league => days with activity, oldest first
-    uint256[2] public settledDays;                                   // league => days settled from the front of _days
-    uint256[2] public rollover;                                      // league => carried into the next settled day
+    mapping(uint8 => uint256[]) internal _days; // league => days with activity, oldest first
+    uint256[2] public settledDays; // league => days settled from the front of _days
+    uint256[2] public rollover; // league => carried into the next settled day
 
     // ───────── events ─────────
     event TurnsBought(address indexed player, uint8 indexed league, uint256 count, uint256 cost, uint256 burned);
     event SessionSet(address indexed player, address indexed session);
-    event SwingCommitted(uint256 indexed swingId, address indexed player, uint8 league, uint8 quality, uint8 velo, uint64 committedAt);
+    event SwingCommitted(
+        uint256 indexed swingId, address indexed player, uint8 league, uint8 quality, uint8 velo, uint64 committedAt
+    );
     event SwingDrawn(uint256 indexed swingId, bytes32 drawHash);
     event SwingRefunded(uint256 indexed swingId, address indexed player, uint8 league);
     event HouseKeySet(bytes32 keyHash); // bytes32(0) when revoked
@@ -148,8 +156,15 @@ contract SwarmDerby {
     event GrandSlam(uint256 indexed swingId, address indexed player, uint8 league, uint16 feet, uint256 payout);
     /// @param amounts what each winner received (0 if the token refused the transfer)
     /// @param rollover the league's rollover after this day: what the next day starts with
-    event DaySettled(uint8 indexed league, uint256 indexed day, address[] winners, uint256[] amounts,
-        address settler, uint256 tip, uint256 rollover);
+    event DaySettled(
+        uint8 indexed league,
+        uint256 indexed day,
+        address[] winners,
+        uint256[] amounts,
+        address settler,
+        uint256 tip,
+        uint256 rollover
+    );
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
@@ -190,8 +205,25 @@ contract SwarmDerby {
 
     /// @param owner_ admin address. Pass it explicitly: when IMD's launch factory deploys
     ///               this, msg.sender is the factory (use `$owner` in the launch request).
-    /// @param houseKey_ the house RSA modulus, 256 bytes big-endian (e = 65537)
-    constructor(address owner_, IERC20 imd_, uint256 singlePrice_, uint256 packPrice_, bytes memory houseKey_) {
+    /// @dev The 256-byte big-endian RSA modulus (e = 65537) is passed as eight consecutive
+    ///      words, most significant first, because the launch factory accepts only static arguments.
+    constructor(
+        address owner_,
+        IERC20 imd_,
+        uint256 singlePrice_,
+        uint256 packPrice_,
+        bytes32 houseKey0_,
+        bytes32 houseKey1_,
+        bytes32 houseKey2_,
+        bytes32 houseKey3_,
+        bytes32 houseKey4_,
+        bytes32 houseKey5_,
+        bytes32 houseKey6_,
+        bytes32 houseKey7_
+    ) {
+        bytes memory houseKey_ = abi.encodePacked(
+            houseKey0_, houseKey1_, houseKey2_, houseKey3_, houseKey4_, houseKey5_, houseKey6_, houseKey7_
+        );
         if (owner_ == address(0) || address(imd_) == address(0)) revert ZeroAddress();
         _checkPrices(singlePrice_, packPrice_);
         _checkKey(houseKey_);
@@ -220,6 +252,7 @@ contract SwarmDerby {
     ///      buying turns tops up its player instead of stranding them on the key.
     function _buy(uint8 league, uint256 count, uint256 cost) internal {
         if (count == 0) revert ZeroCount();
+        if (houseKey.length == 0) revert NoHouseKey();
         address player = playerOf(msg.sender);
         uint256 burned = (cost * BURN_BPS) / 10_000;
         uint256 toPot = (cost * POT_BPS) / 10_000;
@@ -242,9 +275,9 @@ contract SwarmDerby {
 
     /// @notice What a session key signs (EIP-712) to agree to swing for `player`.
     function sessionDigest(address player, address session) public view returns (bytes32) {
-        bytes32 domain = keccak256(abi.encode(
-            DOMAIN_TYPEHASH, keccak256("SwarmDerby"), keccak256("1"), block.chainid, address(this)
-        ));
+        bytes32 domain = keccak256(
+            abi.encode(DOMAIN_TYPEHASH, keccak256("SwarmDerby"), keccak256("1"), block.chainid, address(this))
+        );
         bytes32 structHash = keccak256(abi.encode(SESSION_TYPEHASH, player, session, sessionNonce[session]));
         return keccak256(abi.encodePacked("\x19\x01", domain, structHash));
     }
@@ -424,10 +457,16 @@ contract SwarmDerby {
 
     /// @notice A league's top players for a day, highest first. Arcade scores are longest
     ///         homers; agent scores are total homer feet.
-    function board(uint8 league, uint256 day) external view returns (address[] memory players, uint256[] memory scores) {
+    function board(uint8 league, uint256 day)
+        external
+        view
+        returns (address[] memory players, uint256[] memory scores)
+    {
         players = _board[league][day];
         scores = new uint256[](players.length);
-        for (uint256 i; i < players.length; ++i) scores[i] = dayScore[league][day][players[i]];
+        for (uint256 i; i < players.length; ++i) {
+            scores[i] = dayScore[league][day][players[i]];
+        }
     }
 
     function _recordDinger(uint8 league, uint256 day, address player, uint256 feet) internal {
@@ -451,7 +490,10 @@ contract SwarmDerby {
         uint256 n = b.length;
         uint256 i = n; // player's slot; n = not on the board
         for (uint256 k; k < n; ++k) {
-            if (b[k] == player) { i = k; break; }
+            if (b[k] == player) {
+                i = k;
+                break;
+            }
         }
         if (i == n) {
             if (n < BOARD_SIZE) {
@@ -474,8 +516,7 @@ contract SwarmDerby {
     /// @notice True once `day` is over and none of its swings can still be drawn or revealed,
     ///         so its board is final.
     function dayClosed(uint8 league, uint256 day) public view returns (bool) {
-        return day < currentDay()
-            && block.timestamp > uint256(dayLastCommit[league][day]) + DRAW_WINDOW + REVEAL_WINDOW;
+        return day < currentDay() && block.timestamp > uint256(dayLastCommit[league][day]) + DRAW_WINDOW + REVEAL_WINDOW;
     }
 
     /// @notice The league's oldest unsettled day and what settling it now would pay.
@@ -548,7 +589,9 @@ contract SwarmDerby {
         uint256[] storage all = _days[league];
         uint256 start = settledDays[league];
         list = new uint256[](all.length - start);
-        for (uint256 k; k < list.length; ++k) list[k] = all[start + k];
+        for (uint256 k; k < list.length; ++k) {
+            list[k] = all[start + k];
+        }
     }
 
     function _markDay(uint8 league, uint256 day) internal {
@@ -651,7 +694,8 @@ contract SwarmDerby {
         // refuse to credit a purchase until the token exists. Checked here, not in the
         // constructor, so deploy rehearsals without the token's code still work.
         if (address(imd).code.length == 0) revert NotAContract();
-        (bool ok, bytes memory data) = address(imd).call(abi.encodeCall(IERC20.transferFrom, (from, address(this), amount)));
+        (bool ok, bytes memory data) =
+            address(imd).call(abi.encodeCall(IERC20.transferFrom, (from, address(this), amount)));
         if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
