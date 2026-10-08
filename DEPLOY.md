@@ -150,7 +150,13 @@ the queue; nothing expires.
 `928b670b` (on commit `f797a19`) found 1 medium, 3 low and 3 info items. The medium and the
 three lows are fixed: the reclaim grace starts no earlier than settlement, a late settle takes
 no carry, a studio that cannot be paid is credited, and `openDay()` names a day that is still
-extended. The info items are operating notes under **Known limits**. Nothing is deployed yet.
+extended. The info items are operating notes under **Known limits**.
+
+**Live:** `0x0d81989ea1a4fdafb309ce738271d3bd659dab7b` on Robinhood Chain (IMD launch #1053,
+job `3bfde4f8`, block 83400203, tx `0xc99f49bb…d452ba6c`), deployed from commit `5c5c30d`
+with the arguments below; owner and studio are the owner wallet that the launch named.
+Its runtime is byte-identical to a local build of `5c5c30d` with the two immutables masked.
+The launch's own audit panel found no critical, high, medium or low defect.
 
 Constructor arguments, in order:
 
@@ -172,8 +178,8 @@ it calls neither IMD nor SwarmDerby and works in the launch harness on an empty 
 The first bid checks the token's code and requires receipt of the full bid. Transfers accept
 standard boolean returns or no return data. This is for the exact-transfer, non-rebasing IMD
 token; fee-on-transfer deposits are rejected. The addresses above are supplied by this repo's
-deployment notes and specs, and were not verified against a live RPC in this package. The
-deployer must verify the target chain and the configured token and derby before launch.
+deployment notes and specs. The launch checked them on chain 4663: the token reports IMD
+with 18 decimals, and the derby is the live SwarmDerby that uses that token.
 
 Use the existing contracts import and readiness-check flow with this `evm_contracts` body.
 Replace the repo, pinned commit, and owner placeholders with the actual launch values:
